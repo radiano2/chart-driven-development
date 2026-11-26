@@ -59,10 +59,11 @@ export const api = {
   create: (name: string, idea: string) => call<{ name: string; chart: ProjectChart }>("POST", "/api/projects", { name, idea }),
   browse: (path: string | null) => call<FolderListing>("GET", `/api/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`),
   inspectFolder: (path: string) => call<FolderInspection>("POST", "/api/open/inspect", { path }),
-  openPath: (path: string) => call<{ name: string; chart: ProjectChart; summary?: string; warnings?: string[] }>("POST", "/api/open", { path }),
+  openPath: (path: string) => call<{ name: string; chart: ProjectChart; drawing: boolean; summary?: string; warnings?: string[] }>("POST", "/api/open", { path }),
   find: (description: string) => call<FindResult>("POST", "/api/find", { description }),
   forget: (name: string) => call<{ ok: boolean }>("POST", `${P(name)}/forget`),
-  open: (name: string) => call<{ name: string; dir: string; chart: ProjectChart; outside: string[] }>("GET", P(name)),
+  open: (name: string) => call<{ name: string; dir: string; chart: ProjectChart; outside: string[]; drawing: boolean }>("GET", P(name)),
+  redraw: (name: string) => call<{ ok: boolean }>("POST", `${P(name)}/redraw`),
   stack: (name: string) => call<StackProposal>("POST", `${P(name)}/stack`),
   generate: (name: string, stack: Stack) => call<{ chart: ProjectChart }>("POST", `${P(name)}/generate`, { stack }),
   recommend: (name: string, level: Level, bubbleId: string, request: string) =>

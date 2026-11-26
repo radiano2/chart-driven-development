@@ -1,5 +1,6 @@
 import type {
   Bubble,
+  Chart,
   ChangeSet,
   DesignReference,
   StyleGuide,
@@ -59,12 +60,25 @@ export interface ImportContext {
   omitted: number;
 }
 
-export interface ImportedChart {
+/** First step of drawing an existing codebase: its modules, the arrows between them, and which files each owns. */
+export interface ImportedModules {
   /** One sentence on what the app does (shown as the project's idea). */
   idea: string;
   stack: Stack | null;
+  /** Module bubbles (no inner charts yet) and the arrows between them. */
   root: ProjectChart["root"];
+  /** Module id → the files that belong to it. */
+  files: Record<string, string[]>;
   summary: string;
+}
+
+/** Second step, once per module: the module's own files, to draw its function bubbles. */
+export interface ModuleContext {
+  folder: string;
+  /** The chart so far (modules, and the inner charts drawn already). */
+  chart: ProjectChart;
+  module: Bubble;
+  files: FileChange[];
 }
 
 /** A project folder found on disk, as the AI sees it when picking matches. */
@@ -101,8 +115,10 @@ export interface AI {
   implementBubble(ctx: FocusContext): Promise<ChangeSet>;
   /** Read code edited outside the app and update the chart to match. */
   syncFromCode(ctx: SyncContext): Promise<ChangeSet>;
-  /** Read an existing codebase and draw its chart (modules → function bubbles). Never changes code. */
-  chartFromCode(ctx: ImportContext): Promise<ImportedChart>;
+  /** Read an existing codebase and draw its module chart. Never changes code. */
+  chartModules(ctx: ImportContext): Promise<ImportedModules>;
+  /** Draw one module's inner chart of functions from its files. Never changes code. */
+  chartModule(ctx: ModuleContext): Promise<Chart>;
   /** Pick the folders that best match what the user described. Paths must come from `candidates`. */
   pickProjects(ctx: { request: string; candidates: FolderCandidate[] }): Promise<{ path: string; reason: string }[]>;
   /** Invent abstract sample data and trace it through one chart level. */

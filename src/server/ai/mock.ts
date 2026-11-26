@@ -1,14 +1,20 @@
 // Offline AI for tests and demos without an API key (CDD_AI=mock).
 // Always designs the same todo app; extensions add simple pass-through functions.
 import { getLevel, slug } from "../../shared/chart.ts";
-import type { Bubble, ChangeSet, ChartOp, FileChange, Level, ProjectChart, Recommendation, RunTrace } from "../../shared/types.ts";
+import type { Bubble, Chart, ChangeSet, ChartOp, FileChange, Level, ProjectChart, Recommendation, RunTrace } from "../../shared/types.ts";
 import type { StyleGuide } from "../../shared/types.ts";
 import { styleCss } from "../design/style.ts";
-import type { AI, DesignContext, FocusContext, FolderCandidate, ImportContext, ImportedChart, MockupDraft, SyncContext, WriteCodeContext } from "./ai.ts";
+import type { AI, DesignContext, FocusContext, FolderCandidate, ImportContext, ImportedModules, MockupDraft, ModuleContext, SyncContext, WriteCodeContext } from "./ai.ts";
 import { keywordScore } from "../importer.ts";
 import { TODO_ALTERNATIVES, TODO_CHART, TODO_MODULE_FILES, TODO_SCAFFOLD, TODO_STACK } from "./mock-todo.ts";
 
 const clone = <T>(v: T): T => structuredClone(v);
+
+/** CDD_MOCK_DELAY_MS slows the mock's chart drawing down, to watch the drawing animation offline. */
+const mockDelay = () => {
+  const ms = Number(process.env.CDD_MOCK_DELAY_MS) || 0;
+  return ms > 0 ? new Promise((r) => setTimeout(r, Math.min(ms, 10_000))) : Promise.resolve();
+};
 
 function camel(s: string): string {
   const words = s.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[^a-zA-Z0-9]+/g, " ").trim().split(/\s+/).slice(0, 4);
@@ -134,29 +140,45 @@ export class MockAI implements AI {
     return { summary: ops.length ? `Updated ${ops.length} bubble(s) from the code.` : "The chart already matches the code.", ops, files: [] };
   }
 
-  /** A rough chart from the code itself: one module per top folder, one bubble per function it defines. */
-  async chartFromCode(ctx: ImportContext): Promise<ImportedChart> {
-    const groups = new Map<string, FileChange[]>();
+  /** A rough module chart from the code itself: one module per top folder. */
+  async chartModules(ctx: ImportContext): Promise<ImportedModules> {
+    await mockDelay();
+    const groups = new Map<string, string[]>();
     for (const f of ctx.files) {
       if (!f.content || !/\.(m?[jt]sx?|py|go|rs|rb)$/.test(f.path)) continue;
       const parts = f.path.split("/");
       const key = parts.length > 2 && /^(src|lib|app)$/.test(parts[0]) ? parts[1] : parts.length > 1 ? parts[0] : f.path.replace(/\.\w+$/, "");
-      groups.set(key, [...(groups.get(key) ?? []), f]);
+      groups.set(key, [...(groups.get(key) ?? []), f.path]);
     }
-    const nodes: Bubble[] = [];
-    for (const [key, files] of [...groups].slice(0, 8)) {
-      const fns: Bubble[] = [];
-      for (const f of files) {
-        for (const m of f.content!.matchAll(/(?:function\s+|def\s+|func\s+|fn\s+|(?:const|let)\s+)([A-Za-z_]\w*)\s*(?:=\s*(?:async\s*)?\(|\()/g)) {
-          const id = slug(m[1]);
-          if (fns.some((b) => b.id === id) || fns.length >= 8) continue;
-          fns.push({ id, name: m[1], kind: "function", description: `${m[1]} in ${f.path}.`, inputs: [], outputs: [], status: "ready", file: f.path, symbol: m[1] });
-        }
-      }
-      nodes.push({ id: slug(key), name: key, kind: "module", description: `Code in ${files.map((f) => f.path).join(", ")}.`, inputs: [], outputs: [], status: "ready", file: files[0].path, children: { nodes: fns, edges: [] } });
-    }
+    const nodes: Bubble[] = [...groups].slice(0, 8).map(([key, paths]) => ({
+      id: slug(key),
+      name: key,
+      kind: "module",
+      description: `Code in ${paths.join(", ")}.`,
+      inputs: [],
+      outputs: [],
+      status: "ready",
+      file: paths[0],
+      children: { nodes: [], edges: [] },
+    }));
     const edges = nodes.slice(1).map((n, i) => ({ id: `${nodes[i].id}--${n.id}`, from: nodes[i].id, to: n.id, data: "data", order: i + 1 }));
-    return { idea: `The existing ${ctx.folder} project`, summary: `${nodes.length} module(s) read from ${ctx.files.length} file(s).`, stack: null, root: { nodes, edges } };
+    const files = Object.fromEntries([...groups].map(([key, paths]) => [slug(key), paths]));
+    return { idea: `The existing ${ctx.folder} project`, summary: `${nodes.length} module(s) read from ${ctx.files.length} file(s).`, stack: null, root: { nodes, edges }, files };
+  }
+
+  /** One bubble per function the module's files define. */
+  async chartModule(ctx: ModuleContext): Promise<Chart> {
+    await mockDelay();
+    const fns: Bubble[] = [];
+    for (const f of ctx.files) {
+      for (const m of (f.content ?? "").matchAll(/(?:function\s+|def\s+|func\s+|fn\s+|(?:const|let)\s+)([A-Za-z_]\w*)\s*(?:=\s*(?:async\s*)?\(|\()/g)) {
+        const id = slug(m[1]);
+        if (fns.some((b) => b.id === id) || fns.length >= 8) continue;
+        fns.push({ id, name: m[1], kind: "function", description: `${m[1]} in ${f.path}.`, inputs: [], outputs: [], status: "ready", file: f.path, symbol: m[1] });
+      }
+    }
+    const edges = fns.slice(1).map((n, i) => ({ id: `${fns[i].id}--${n.id}`, from: fns[i].id, to: n.id, data: "data", order: i + 1 }));
+    return { nodes: fns, edges };
   }
 
   async pickProjects(ctx: { request: string; candidates: FolderCandidate[] }) {

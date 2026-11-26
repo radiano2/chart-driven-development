@@ -11,6 +11,7 @@ import { MockAI } from "../src/server/ai/mock.ts";
 import { createServer } from "../src/server/index.ts";
 import { scanForProjects, selectSources } from "../src/server/importer.ts";
 import { Workspace } from "../src/server/project.ts";
+import type { ProjectChart, ServerEvent } from "../src/shared/types.ts";
 
 let tmp = "";
 let wsRoot = "";
@@ -70,7 +71,7 @@ describe("opening a codebase that isn't a git repo", () => {
   });
 
   it("starts a repo, draws the chart from the code and lists the project", async () => {
-    const r = await ws.openFolder(dir);
+    const r = await ws.openFolder(dir, { wait: true });
     assert.equal(r.name, "notes");
     assert.ok(r.chart.root.nodes.length >= 2);
     const notes = r.chart.root.nodes.find((n) => n.id === "notes");
@@ -137,7 +138,7 @@ describe("opening an existing git repo", () => {
     assert.equal(info.blocked, null);
     assert.equal(info.git.branch, "trunk");
     assert.equal(info.name, "notes-2", "the name is free");
-    const r = await ws.openFolder(dir);
+    const r = await ws.openFolder(dir, { wait: true });
     assert.equal(r.name, "notes-2");
     assert.equal(gitIn(dir, "branch", "--show-current"), "trunk");
     assert.deepEqual(gitIn(dir, "log", "--pretty=%s").split("\n"), ["Draw chart from the existing code", "my own commit"]);
@@ -186,16 +187,126 @@ describe("a Chart Driven Development project copied from elsewhere", () => {
   });
 });
 
+describe("drawing step by step", () => {
+  /** Mock AI whose steps wait for the test to let them go, so each step can be checked. */
+  class GatedAI extends MockAI {
+    gates: (() => void)[] = [];
+    failModules = false;
+    failModule: string | null = null;
+    private gate() {
+      return new Promise<void>((r) => this.gates.push(r));
+    }
+    override async chartModules(ctx: Parameters<MockAI["chartModules"]>[0]) {
+      await this.gate();
+      if (this.failModules) throw new Error("DeepSeek is down");
+      return super.chartModules(ctx);
+    }
+    override async chartModule(ctx: Parameters<MockAI["chartModule"]>[0]) {
+      await this.gate();
+      if (ctx.module.id === this.failModule) throw new Error("cut off");
+      return super.chartModule(ctx);
+    }
+  }
+  const until = async (fn: () => boolean) => {
+    for (let i = 0; i < 200 && !fn(); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(fn(), "timed out");
+  };
+  const release = async (ai: GatedAI) => {
+    await until(() => ai.gates.length > 0);
+    ai.gates.shift()!();
+  };
+
+  it("shows modules first, then fills in each module, and commits once at the end", async () => {
+    const ai = new GatedAI();
+    const w = new Workspace(path.join(tmp, "ws-steps"), ai);
+    const dir = path.join(disk, "steps", "notes");
+    await write(dir, CODE);
+    const r = await w.openFolder(dir);
+    assert.equal(r.drawing, true);
+    assert.equal(r.chart.drawing, true);
+    assert.equal(r.chart.root.nodes.length, 0, "an empty board to start");
+    const p = w.get(r.name);
+    const charts: ProjectChart[] = [];
+    let drawn: Extract<ServerEvent, { type: "drawn" }> | null = null;
+    p.events.on("event", (ev: ServerEvent) => {
+      if (ev.type === "chart") charts.push(structuredClone(ev.chart));
+      if (ev.type === "drawn") drawn = ev;
+    });
+
+    await release(ai); // modules
+    await until(() => charts.some((c) => c.root.nodes.length > 0));
+    const first = charts.find((c) => c.root.nodes.length > 0)!;
+    assert.ok(first.drawing);
+    assert.ok(first.root.nodes.every((m) => !m.children?.nodes.length), "modules arrive before their functions");
+    assert.equal(gitIn(dir, "log", "--pretty=%s", "-1"), "Before Chart Driven Development: the existing files", "nothing committed mid-way");
+
+    const count = first.root.nodes.length;
+    for (let i = 0; i < count; i++) {
+      await release(ai);
+      await until(() => charts.at(-1)!.root.nodes.filter((m) => m.children?.nodes.length).length >= i + 1 || !!drawn);
+    }
+    await until(() => !!drawn);
+    const done = drawn as unknown as Extract<ServerEvent, { type: "drawn" }>;
+    assert.equal(done.chart.drawing, undefined);
+    assert.ok(done.chart.root.nodes.find((m) => m.id === "notes")?.children?.nodes.some((f) => f.symbol === "addNote"));
+    assert.equal(gitIn(dir, "log", "--pretty=%s", "-1"), "Draw chart from the existing code");
+    assert.equal(gitIn(dir, "status", "--porcelain"), "");
+    assert.equal(p.drawing, null);
+    w.closeAll();
+  });
+
+  it("keeps going when one module can't be drawn", async () => {
+    const ai = new GatedAI();
+    ai.failModule = "storage";
+    const w = new Workspace(path.join(tmp, "ws-partial"), ai);
+    const dir = path.join(disk, "partial", "notes");
+    await write(dir, CODE);
+    const opened = w.openFolder(dir, { wait: true });
+    const pump = setInterval(() => ai.gates.shift()?.(), 5);
+    const r = await opened.finally(() => clearInterval(pump));
+    assert.ok(r.warnings?.some((x) => /Storage|storage/.test(x) && /couldn't be drawn/.test(x)));
+    assert.equal(r.chart.root.nodes.find((m) => m.id === "storage")?.children?.nodes.length, 0);
+    assert.ok(r.chart.root.nodes.find((m) => m.id === "notes")?.children?.nodes.length);
+    w.closeAll();
+  });
+
+  it("puts the folder back and leaves the list when drawing fails", async () => {
+    const ai = new GatedAI();
+    ai.failModules = true;
+    const w = new Workspace(path.join(tmp, "ws-fail"), ai);
+    const dir = path.join(disk, "failing", "notes");
+    await write(dir, CODE);
+    const r = await w.openFolder(dir);
+    const p = w.get(r.name);
+    let failed = "";
+    p.events.on("event", (ev: ServerEvent) => {
+      if (ev.type === "draw-failed") failed = ev.message;
+    });
+    await release(ai);
+    await until(() => !!failed);
+    assert.match(failed, /DeepSeek is down/);
+    await until(() => !existsSync(path.join(dir, ".chart")));
+    assert.equal((await w.list()).length, 0);
+    assert.equal(await readFile(path.join(dir, "src/server.js"), "utf8"), CODE["src/server.js"]);
+    // Opening it again starts over.
+    ai.failModules = false;
+    const pump = setInterval(() => ai.gates.shift()?.(), 5);
+    const again = await w.openFolder(dir, { wait: true }).finally(() => clearInterval(pump));
+    assert.ok(again.chart.root.nodes.length > 0);
+    w.closeAll();
+  });
+});
+
 describe("moved and damaged folders", () => {
   it("a moved folder takes back its name when opened from its new place", async () => {
     const a = path.join(disk, "moving", "before", "mover");
     await write(a, { "main.py": "def run():\n    pass\n" });
-    assert.equal((await ws.openFolder(a)).name, "mover");
+    assert.equal((await ws.openFolder(a, { wait: true })).name, "mover");
     const b = path.join(disk, "moving", "after", "mover");
     await mkdir(path.dirname(b), { recursive: true });
     await (await import("node:fs/promises")).rename(a, b);
     assert.equal((await ws.list()).find((p) => p.name === "mover")?.missing, true);
-    const r = await ws.openFolder(b);
+    const r = await ws.openFolder(b, { wait: true });
     assert.equal(r.name, "mover");
     assert.equal(ws.get("mover").dir, b);
     assert.equal((await ws.list()).filter((p) => p.name.startsWith("mover")).length, 1);
@@ -296,8 +407,18 @@ describe("HTTP API", () => {
     const opened = await call("POST", "/api/open", { path: dir });
     assert.equal(opened.status, 200);
     assert.equal(opened.data.name, "chess-engine");
-    const proj = await call("GET", "/api/projects/chess-engine");
+    assert.equal(opened.data.drawing, true, "returns at once; the chart arrives as events");
+    let proj = await call("GET", "/api/projects/chess-engine");
     assert.equal(proj.data.dir, dir);
+    for (let i = 0; i < 100 && proj.data.drawing; i++) {
+      await new Promise((r) => setTimeout(r, 30));
+      proj = await call("GET", "/api/projects/chess-engine");
+    }
+    assert.equal(proj.data.drawing, false);
+    assert.ok(proj.data.chart.root.nodes.length > 0);
+    assert.equal(proj.data.chart.drawing, undefined);
+    const again = await call("POST", "/api/projects/chess-engine/redraw", {});
+    assert.equal(again.status, 400, "a finished chart isn't redrawn");
     const found = await call("POST", "/api/find", { description: "chess" });
     assert.equal(found.data.matches[0].name, "chess-engine");
     const forget = await call("POST", "/api/projects/chess-engine/forget", {});

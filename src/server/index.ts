@@ -146,6 +146,10 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
       }
       if (parts[1] !== "projects" || parts.length < 3) throw new HttpError(404, "Not found");
 
+      if (parts.length === 4 && parts[3] === "redraw" && method === "POST") {
+        await body(req);
+        return send(res, 200, await ws.redraw(parts[2]));
+      }
       if (parts.length === 4 && parts[3] === "forget" && method === "POST") {
         await body(req);
         return send(res, 200, ws.forget(parts[2]));
@@ -156,7 +160,7 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
       if (method === "GET") {
         switch (action) {
           case "":
-            return send(res, 200, { name: p.name, dir: p.dir, chart: await p.loadChart(), outside: await p.checkOutside(true) });
+            return send(res, 200, { name: p.name, dir: p.dir, chart: await p.loadChart(), outside: await p.checkOutside(true), drawing: !!p.drawing });
           case "history":
             return send(res, 200, await p.history());
           case "file":

@@ -31,7 +31,9 @@ Under **Open an existing project** on the home page:
 Before anything is opened you see what's in the folder and exactly what opening it will do, and you confirm.
 
 - A **Chart Driven Development project** (it has `.chart/chart.json`) is added to your projects as it is.
-- **Any other codebase**: DeepSeek reads the code (manifests and README first, then the source, up to about 110 KB) and draws its chart: modules, the important functions inside each with their real file and name, inputs, outputs and who calls whom. Your code isn't changed. After that it works like any other project.
+- **Any other codebase**: the board opens right away and you watch the chart being drawn. DeepSeek reads the code (manifests and README first, then the source, up to about 110 KB) and finds the modules, which pop onto the board one after another, and the arrows between them draw themselves. Then it reads each module's own files and draws the functions inside, with their real file and name, inputs, outputs and who calls whom; each module pulses as its functions arrive (open one while it's being drawn to see them appear). Your code isn't changed. The chart is committed once, when it's finished; editing waits until then. If drawing fails, the half-drawn chart is removed and the folder leaves your list; if one module can't be drawn, the rest still are and you're told which. After that it works like any other project.
+  New bubbles and arrows also animate in when the AI or the assistant changes the chart. With "reduce motion" turned on in your system settings, they just appear.
+  `CDD_MOCK_DELAY_MS=1200 npm run start:mock` slows the offline mock down so you can watch the drawing without an API key.
 
 Versions in an existing folder:
 

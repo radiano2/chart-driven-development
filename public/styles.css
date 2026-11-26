@@ -306,3 +306,24 @@ input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--acc
 .project-item .project { flex: 1; }
 .project-item .forget { align-self: flex-start; color: var(--muted); }
 @media (max-width: 600px) { .open-project .row { flex-wrap: wrap; } }
+
+/* ---------- chart growing: new bubbles pop in, new arrows draw themselves ---------- */
+.chart > g.smooth { transition: transform .6s cubic-bezier(.2, .7, .2, 1); }
+.node.glide { transition: transform .55s cubic-bezier(.2, .7, .2, 1); }
+.node-inner { transform-box: fill-box; transform-origin: center; }
+.node.appear .node-inner { animation: bubble-in .55s cubic-bezier(.2, 1.3, .4, 1) var(--delay, 0ms) both; }
+.node.appear .body { animation: bubble-glow 1.6s ease-out var(--delay, 0ms) both; }
+.node.filled .node-inner { animation: bubble-pulse .7s ease-out both; }
+.edge.appear .edge-path { stroke-dasharray: var(--len); marker-end: none; animation: edge-draw .7s ease-out var(--delay, 0ms) both; }
+.edge.appear .edge-label { animation: fade-in .3s ease-out calc(var(--delay, 0ms) + .45s) both; }
+.edge.reflow { animation: fade-in .45s ease-out both; }
+@keyframes bubble-in { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: scale(1); } }
+@keyframes bubble-glow { 0%, 30% { filter: drop-shadow(0 0 9px rgb(109 93 252 / 55%)); } 100% { filter: drop-shadow(0 2px 4px rgb(20 24 40 / 8%)); } }
+@keyframes bubble-pulse { 0% { transform: scale(1); } 35% { transform: scale(1.07); } 100% { transform: scale(1); } }
+@keyframes edge-draw { from { stroke-dashoffset: var(--len); } to { stroke-dashoffset: 0; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+.drawing-note { color: var(--accent); font-weight: 500; display: flex; align-items: center; gap: 8px; }
+@media (prefers-reduced-motion: reduce) {
+  .chart > g.smooth, .node.glide { transition: none; }
+  .node.appear .node-inner, .node.appear .body, .node.filled .node-inner, .edge.appear .edge-path, .edge.appear .edge-label, .edge.reflow { animation: none; }
+}
