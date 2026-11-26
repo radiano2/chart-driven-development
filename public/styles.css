@@ -224,3 +224,21 @@ input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--acc
   .ai-label { display: none; }
   .row { flex-direction: column; }
 }
+
+/* ---------- assistant ---------- */
+.toolbar .assistant-btn { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.panel-body.assistant { height: 100%; }
+.assistant-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.chat-log { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 8px; min-height: 120px; padding: 4px 0; }
+.msg { padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.user { align-self: flex-end; background: var(--accent); color: #fff; max-width: 88%; }
+.msg.reply { background: var(--surface-2); }
+.msg.reply p { margin: 6px 0 0; }
+.activity { font: 12px var(--mono); color: var(--muted); padding-left: 4px; overflow-wrap: anywhere; }
+.activity.failed { color: var(--danger); }
+.activity.working { display: flex; align-items: center; gap: 6px; color: var(--accent); }
+.approval { border: 1px solid var(--amber); background: var(--amber-soft); border-radius: 10px; padding: 10px 12px; }
+.approval p { margin: 0 0 6px; }
+.approval code { display: block; background: var(--surface); padding: 6px 8px; border-radius: 6px; overflow-wrap: anywhere; }
+.chat-input { display: grid; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; }
+.chat-input p { margin: 0; }

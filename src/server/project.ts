@@ -60,7 +60,7 @@ export class Project {
   }
 
   /** Run project operations one at a time; file watching is paused while the app itself writes. */
-  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+  exclusive<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.queue.then(async () => {
       this.busy++;
       try {
@@ -82,13 +82,13 @@ export class Project {
     }
   }
 
-  private async saveChart(pc: ProjectChart) {
+  async saveChart(pc: ProjectChart) {
     await mkdir(path.join(this.dir, ".chart"), { recursive: true });
     await writeFile(path.join(this.dir, CHART_FILE), JSON.stringify(pc, null, 2) + "\n");
     this.emit({ type: "chart", chart: pc });
   }
 
-  private async writeFiles(files: FileChange[]): Promise<string[]> {
+  async writeFiles(files: FileChange[]): Promise<string[]> {
     const written: string[] = [];
     for (const f of files) {
       const abs = safePath(this.dir, f.path);
@@ -124,7 +124,7 @@ export class Project {
     }
   }
 
-  private async commit(message: string) {
+  async commit(message: string) {
     await git.commitAll(this.dir, message);
     this.lastOutside = "";
   }
@@ -289,24 +289,32 @@ export class Project {
   }
 
   restore(sha: string) {
-    return this.exclusive(async () => {
-      // Keep any outside edits in history before replacing the working tree.
-      await this.commit("Save outside edits before restoring");
-      const entries = await git.history(this.dir, 200);
-      const target = entries.find((e) => e.sha.startsWith(sha));
-      if (!target) throw new HttpError(404, "Unknown version");
-      await git.restore(this.dir, target.sha, `Restore: ${target.message.split("\n")[0]}`);
-      const pc = await this.loadChart();
-      this.emit({ type: "chart", chart: pc });
-      return { chart: pc };
-    });
+    return this.exclusive(() => this.restoreUnlocked(sha));
+  }
+
+  /** Restore without taking the project lock (for callers that already hold it, like the assistant). */
+  async restoreUnlocked(sha: string, pendingMessage = "Save outside edits before restoring") {
+    // Keep any uncommitted edits in history before replacing the working tree.
+    await this.commit(pendingMessage);
+    const entries = await git.history(this.dir, 200);
+    const target = entries.find((e) => e.sha.startsWith(sha));
+    if (!target) throw new HttpError(404, "Unknown version");
+    await git.restore(this.dir, target.sha, `Restore: ${target.message.split("\n")[0]}`);
+    const pc = await this.loadChart();
+    this.emit({ type: "chart", chart: pc });
+    return { chart: pc };
   }
 
   /** Go back one step: restore the version before the latest commit. */
   async undo() {
+    return this.exclusive(() => this.undoUnlocked());
+  }
+
+  async undoUnlocked(pendingMessage?: string) {
+    if (pendingMessage) await this.commit(pendingMessage);
     const entries = await git.history(this.dir, 2);
     if (entries.length < 2) throw new HttpError(400, "Nothing to undo");
-    return this.restore(entries[1].sha);
+    return this.restoreUnlocked(entries[1].sha);
   }
 
   // ---------- outside edits ----------

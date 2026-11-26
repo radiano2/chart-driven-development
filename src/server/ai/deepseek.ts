@@ -77,3 +77,55 @@ export function parseJsonLoose(text: string): unknown {
     throw new Error("No JSON object found");
   }
 }
+
+// ---------- function calling (used by the assistant) ----------
+
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+export type ChatMessage =
+  | { role: "system" | "user"; content: string }
+  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[] }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+export interface ToolDef {
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+
+/** A chat model that can call tools (OpenAI-compatible function calling). */
+export interface ToolLLM {
+  chat(messages: ChatMessage[], tools: ToolDef[]): Promise<{ content: string | null; tool_calls?: ToolCall[] }>;
+}
+
+export class DeepSeekTools implements ToolLLM {
+  private apiKey: string;
+  private model: string;
+  private baseUrl: string;
+
+  constructor(opts: DeepSeekOptions) {
+    this.apiKey = opts.apiKey;
+    this.model = opts.model || "deepseek-chat";
+    this.baseUrl = (opts.baseUrl || "https://api.deepseek.com").replace(/\/+$/, "");
+  }
+
+  async chat(messages: ChatMessage[], tools: ToolDef[]) {
+    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify({ model: this.model, messages, tools, temperature: 0.2, max_tokens: 8000 }),
+      signal: AbortSignal.timeout(240_000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`DeepSeek API error ${res.status}: ${body.slice(0, 500)}`);
+    }
+    const data = (await res.json()) as { choices?: { message?: { content?: string | null; tool_calls?: ToolCall[] } }[] };
+    const msg = data.choices?.[0]?.message;
+    if (!msg) throw new Error("DeepSeek returned an empty response");
+    return { content: msg.content ?? null, tool_calls: msg.tool_calls?.length ? msg.tool_calls : undefined };
+  }
+}

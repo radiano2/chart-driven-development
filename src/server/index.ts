@@ -6,7 +6,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerEvent } from "../shared/types.ts";
 import type { AI } from "./ai/ai.ts";
-import { DeepSeek } from "./ai/deepseek.ts";
+import { DeepSeek, DeepSeekTools, type ToolLLM } from "./ai/deepseek.ts";
+import { AssistantHub } from "./agent/hub.ts";
+import { MockToolLLM } from "./agent/mock-llm.ts";
+import { runTool } from "./agent/tools.ts";
 import { LlmAI } from "./ai/llm.ts";
 import { MockAI } from "./ai/mock.ts";
 import { HttpError, Workspace } from "./project.ts";
@@ -22,14 +25,23 @@ const MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
 };
 
-export function makeAI(env = process.env): { ai: AI; label: string } {
-  if (env.CDD_AI === "mock") return { ai: new MockAI(), label: "mock (canned todo app)" };
+export function makeAI(env = process.env): { ai: AI; tools: ToolLLM; label: string } {
+  if (env.CDD_AI === "mock") return { ai: new MockAI(), tools: new MockToolLLM(), label: "mock (canned todo app)" };
   const key = env.DEEPSEEK_API_KEY;
   if (!key) {
     throw new Error("DEEPSEEK_API_KEY is not set. Put it in .env (see .env.example), or run `npm run start:mock` to try the app offline.");
   }
   const model = env.DEEPSEEK_MODEL || "deepseek-chat";
-  return { ai: new LlmAI(new DeepSeek({ apiKey: key, model, baseUrl: env.DEEPSEEK_BASE_URL })), label: `DeepSeek (${model})` };
+  const opts = { apiKey: key, model, baseUrl: env.DEEPSEEK_BASE_URL };
+  return { ai: new LlmAI(new DeepSeek(opts)), tools: new DeepSeekTools(opts), label: `DeepSeek (${model})` };
+}
+
+/** Load .env, pick the AI and open the workspace. Shared by the server and the `cdd` CLI. */
+export function setup(env = process.env) {
+  if (existsSync(path.join(ROOT, ".env"))) process.loadEnvFile(path.join(ROOT, ".env"));
+  const ai = makeAI(env);
+  const workspace = path.resolve(env.CDD_WORKSPACE || path.join(ROOT, "projects"));
+  return { ...ai, workspace, ws: new Workspace(workspace, ai.ai) };
 }
 
 async function body(req: http.IncomingMessage): Promise<Record<string, unknown>> {
@@ -56,7 +68,7 @@ const str = (v: unknown, name: string): string => {
   return v;
 };
 
-export function createServer(ws: Workspace, aiLabel: string) {
+export function createServer(ws: Workspace, aiLabel: string, hub = new AssistantHub(new MockToolLLM())) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
@@ -88,6 +100,8 @@ export function createServer(ws: Workspace, aiLabel: string) {
             return send(res, 200, { path: url.searchParams.get("path"), content: await p.readSourceFile(str(url.searchParams.get("path"), "path")) });
           case "events":
             return streamEvents(p.events, req, res);
+          case "assistant":
+            return send(res, 200, hub.transcript(p));
         }
       }
 
@@ -121,6 +135,16 @@ export function createServer(ws: Workspace, aiLabel: string) {
             return send(res, 200, await p.syncFromCode());
           case "accept-outside":
             return send(res, 200, await p.acceptOutside());
+          case "assistant":
+            return send(res, 200, await hub.get(p).ask(str(b.message, "message")));
+          case "assistant/approve":
+            if (!hub.resolve(p.name, str(b.id, "id"), b.allow === true)) throw new HttpError(404, "No such request (it may have timed out)");
+            return send(res, 200, { ok: true });
+          case "assistant/reset":
+            hub.get(p).reset();
+            return send(res, 200, { ok: true });
+          case "open-folder":
+            return send(res, 200, { message: await runTool("open_folder", {}, { project: p, approve: async () => false, changed: new Set(), pendingMessage: "" }) });
         }
       }
       throw new HttpError(404, "Not found");
@@ -156,23 +180,20 @@ async function serveStatic(pathname: string, res: http.ServerResponse) {
 }
 
 async function main() {
-  if (existsSync(path.join(ROOT, ".env"))) process.loadEnvFile(path.join(ROOT, ".env"));
-  let ai: { ai: AI; label: string };
+  let cfg: ReturnType<typeof setup>;
   try {
-    ai = makeAI();
+    cfg = setup();
   } catch (e) {
     console.error((e as Error).message);
     process.exit(1);
   }
-  const workspace = path.resolve(process.env.CDD_WORKSPACE || path.join(ROOT, "projects"));
-  const ws = new Workspace(workspace, ai.ai);
   const port = Number(process.env.PORT) || 4317;
-  createServer(ws, ai.label).listen(port, "127.0.0.1", () => {
+  createServer(cfg.ws, cfg.label, new AssistantHub(cfg.tools)).listen(port, "127.0.0.1", () => {
     console.log(`Chart Driven Development: http://localhost:${port}`);
-    console.log(`AI: ${ai.label}   Projects folder: ${workspace}`);
+    console.log(`AI: ${cfg.label}   Projects folder: ${cfg.workspace}`);
   });
   process.on("SIGINT", () => {
-    ws.closeAll();
+    cfg.ws.closeAll();
     process.exit(0);
   });
 }

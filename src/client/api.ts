@@ -56,6 +56,11 @@ export const api = {
   sync: (name: string) => call<ChangeResult>("POST", `${P(name)}/sync`),
   acceptOutside: (name: string) => call<{ ok: boolean }>("POST", `${P(name)}/accept-outside`),
   file: (name: string, path: string) => call<{ path: string; content: string }>("GET", `${P(name)}/file?path=${encodeURIComponent(path)}`),
+  assistant: (name: string, message: string) => call<{ reply: string; changed: string[] }>("POST", `${P(name)}/assistant`, { message }),
+  assistantTranscript: (name: string) => call<{ role: "user" | "assistant"; text: string }[]>("GET", `${P(name)}/assistant`),
+  approve: (name: string, id: string, allow: boolean) => call<{ ok: boolean }>("POST", `${P(name)}/assistant/approve`, { id, allow }),
+  resetAssistant: (name: string) => call<{ ok: boolean }>("POST", `${P(name)}/assistant/reset`),
+  openFolder: (name: string) => call<{ message: string }>("POST", `${P(name)}/open-folder`),
   events(name: string, onEvent: (e: ServerEvent) => void): EventSource {
     const es = new EventSource(`${P(name)}/events`);
     es.onmessage = (m) => onEvent(JSON.parse(m.data) as ServerEvent);
