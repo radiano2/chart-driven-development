@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chart Driven Development</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='8' cy='16' r='6' fill='%236d5dfc'/><circle cx='24' cy='8' r='5' fill='%2322b8a6'/><circle cx='24' cy='24' r='5' fill='%2322b8a6'/><path d='M13 14 L19 10 M13 18 L19 22' stroke='%23888' stroke-width='2'/></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <button class="brand" id="home-link" title="All projects">
+      <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true"><circle cx="8" cy="16" r="6" fill="var(--accent)"/><circle cx="24" cy="8" r="5" fill="var(--teal)"/><circle cx="24" cy="24" r="5" fill="var(--teal)"/><path d="M13 14 L19 10 M13 18 L19 22" stroke="var(--muted)" stroke-width="2"/></svg>
+      <span>Chart Driven Development</span>
+    </button>
+    <nav class="crumbs" id="crumbs" aria-label="Where you are"></nav>
+    <div class="spacer"></div>
+    <div class="status" id="status" hidden><span class="spinner"></span><span id="status-text"></span></div>
+    <span class="ai-label" id="ai-label"></span>
+  </header>
+
+  <!-- Home: projects + new idea -->
+  <main id="home" class="page">
+    <section class="new-project card">
+      <h1>What do you want to build?</h1>
+      <p class="muted">Describe an app in a sentence. The AI suggests a tech stack, draws the app as a flowchart, and writes real code into a project folder.</p>
+      <form id="new-form">
+        <textarea id="idea" rows="3" placeholder="e.g. a todo app where I can add, tick off and delete todos" required></textarea>
+        <div class="row">
+          <input id="project-name" placeholder="Folder name (optional)" autocomplete="off">
+          <button class="primary" type="submit">Start</button>
+        </div>
+      </form>
+    </section>
+    <section>
+      <h2>Your projects</h2>
+      <div id="project-list" class="project-list"></div>
+    </section>
+  </main>
+
+  <!-- Stack choice -->
+  <main id="stack-page" class="page" hidden>
+    <section class="card">
+      <h1 id="stack-title">Pick a tech stack</h1>
+      <p class="muted" id="stack-idea"></p>
+      <div id="stack-options" class="stack-options"></div>
+      <ol id="gen-log" class="gen-log"></ol>
+    </section>
+  </main>
+
+  <!-- Chart workspace -->
+  <main id="workspace" class="workspace" hidden>
+    <div class="canvas-wrap">
+      <div class="toolbar">
+        <button id="btn-up" title="Back to all modules">↑ Modules</button>
+        <button id="btn-draw" title="Draw a new bubble by hand">＋ Bubble</button>
+        <button id="btn-run" class="run" title="Animate invented test data flowing through this chart">▶ Run</button>
+        <span class="sep"></span>
+        <button id="btn-undo" title="Undo the last change (code and chart)">↶ Undo</button>
+        <button id="btn-history" title="Version history">History</button>
+        <span class="sep"></span>
+        <button id="btn-zoom-out" title="Zoom out">−</button>
+        <button id="btn-fit" title="Fit to screen">Fit</button>
+        <button id="btn-zoom-in" title="Zoom in">＋</button>
+      </div>
+      <div id="outside-banner" class="banner" hidden></div>
+      <div id="connect-hint" class="hint" hidden>Click the bubble the arrow should go to. Click empty space to cancel.</div>
+      <svg id="chart" class="chart" role="img" aria-label="Flowchart"></svg>
+      <div id="empty-level" class="empty-level" hidden>This module is empty. Use <b>＋ Bubble</b> to draw its first function.</div>
+    </div>
+    <aside class="panel" id="panel"></aside>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="/build/app.js"></script>
+</body>
+</html>
