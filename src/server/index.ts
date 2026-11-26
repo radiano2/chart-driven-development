@@ -10,6 +10,7 @@ import { MockToolLLM } from "./agent/mock-llm.ts";
 import { runTool } from "./agent/tools.ts";
 import { Design } from "./design/design.ts";
 import { closeBrowser } from "./design/render.ts";
+import { listFolder } from "./importer.ts";
 import { HttpError, type Project, Workspace } from "./project.ts";
 import { Brain, SettingsStore } from "./settings.ts";
 
@@ -30,7 +31,7 @@ export function setup(env = process.env) {
   const settings = new SettingsStore(path.resolve(env.CDD_SETTINGS || path.join(ROOT, ".cdd", "settings.json")), env);
   const brain = new Brain(settings);
   const workspace = path.resolve(env.CDD_WORKSPACE || path.join(ROOT, "projects"));
-  return { brain, tools: brain.tools, workspace, ws: new Workspace(workspace, brain.ai) };
+  return { brain, tools: brain.tools, workspace, ws: new Workspace(workspace, brain.ai, { protectedDirs: [ROOT] }) };
 }
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
@@ -122,6 +123,19 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
         }
         throw new HttpError(404, "Not found");
       }
+      // Opening folders from elsewhere on disk. Browse and inspect only read; open writes .chart (and git) into the folder.
+      if (parts.length === 2 && parts[1] === "browse" && method === "GET") {
+        return send(res, 200, await listFolder(url.searchParams.get("path"), url.searchParams.get("hidden") === "1"));
+      }
+      if (parts[1] === "open" && method === "POST") {
+        const b = await body(req);
+        if (parts.length === 3 && parts[2] === "inspect") return send(res, 200, await ws.inspect(str(b.path, "path")));
+        if (parts.length === 2) return send(res, 200, await ws.openFolder(str(b.path, "path")));
+      }
+      if (parts.length === 2 && parts[1] === "find" && method === "POST") {
+        const b = await body(req);
+        return send(res, 200, await ws.find(str(b.description, "description").slice(0, 500)));
+      }
       if (parts.length === 2 && parts[1] === "projects") {
         if (method === "GET") return send(res, 200, await ws.list());
         if (method === "POST") {
@@ -132,6 +146,10 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
       }
       if (parts[1] !== "projects" || parts.length < 3) throw new HttpError(404, "Not found");
 
+      if (parts.length === 4 && parts[3] === "forget" && method === "POST") {
+        await body(req);
+        return send(res, 200, ws.forget(parts[2]));
+      }
       const p = ws.get(parts[2]);
       const action = parts.slice(3).join("/");
 

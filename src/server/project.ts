@@ -1,13 +1,17 @@
 // A generated project: a normal folder on disk with real code, a git repo, and the chart in .chart/chart.json.
 import { EventEmitter } from "node:events";
-import { existsSync, lstatSync, realpathSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { applyOps, filesOf, findBubble, getLevel, normBubble, normEdge, slug } from "../shared/chart.ts";
 import type {
   Bubble,
+  Chart,
   ChangeSet,
   FileChange,
+  FindResult,
+  FolderInspection,
+  FoundProject,
   HistoryEntry,
   Level,
   ProjectChart,
@@ -21,6 +25,21 @@ import type {
 } from "../shared/types.ts";
 import type { AI } from "./ai/ai.ts";
 import * as git from "./git.ts";
+import {
+  DEFAULT_EXCLUDES,
+  MAX_FILES,
+  countFiles,
+  displayPath,
+  expandPath,
+  homeDir,
+  keywordScore,
+  languagesOf,
+  realFolder,
+  scanForProjects,
+  searchRoots,
+  selectSources,
+  within,
+} from "./importer.ts";
 
 const CHART_FILE = ".chart/chart.json";
 
@@ -221,6 +240,23 @@ export class Project {
     });
   }
 
+  /** Read the code already in the folder and draw its chart (for a codebase opened from disk). One commit. */
+  drawFromCode(): Promise<{ chart: ProjectChart; summary: string; warnings: string[] }> {
+    return this.exclusive(async () => {
+      const all = await git.listFiles(this.dir);
+      const { tree, files, omitted } = await selectSources(this.dir, all);
+      this.progress(`Reading ${files.length} file(s) and drawing the chart…`);
+      const imported = await this.ai.chartFromCode({ folder: path.basename(this.dir), tree, files, omitted });
+      if (!imported.root.nodes.length) throw new HttpError(502, "The AI couldn't draw a chart from this code. Try again.");
+      const warnings = dropMissingFiles(imported.root, new Set(all));
+      const pc: ProjectChart = { version: 1, name: this.name, idea: imported.idea || `The existing project in ${path.basename(this.dir)}`, stack: imported.stack, root: imported.root };
+      await this.saveChart(pc);
+      await this.commit(`Draw chart from the existing code\n\n${imported.summary}`);
+      this.progress("Done");
+      return { chart: pc, summary: imported.summary, warnings };
+    });
+  }
+
   // ---------- AI-driven changes ----------
 
   private async focus(pc: ProjectChart, level: Level, bubbleId: string) {
@@ -344,6 +380,8 @@ export class Project {
     const entries = await git.history(this.dir, 200);
     const target = entries.find((e) => e.sha.startsWith(sha.trim().toLowerCase()));
     if (!target) throw new HttpError(404, "Unknown version");
+    // A folder opened from disk has history from before it had a chart; going back there would lose the chart.
+    if (!(await git.hasFileAt(this.dir, target.sha, CHART_FILE))) throw new HttpError(400, "That version is from before this project had a chart, so it can't be restored here. Use git directly if you need it.");
     await git.restore(this.dir, target.sha, `Restore: ${target.message.split("\n")[0]}`);
     const pc = await this.loadChart();
     this.emit({ type: "chart", chart: pc });
@@ -358,7 +396,7 @@ export class Project {
   async undoUnlocked(pendingMessage?: string) {
     if (pendingMessage) await this.commit(pendingMessage);
     const entries = await git.history(this.dir, 2);
-    if (entries.length < 2) throw new HttpError(400, "Nothing to undo");
+    if (entries.length < 2 || !(await git.hasFileAt(this.dir, entries[1].sha, CHART_FILE))) throw new HttpError(400, "Nothing to undo");
     return this.restoreUnlocked(entries[1].sha);
   }
 
@@ -417,17 +455,77 @@ export class Project {
   }
 }
 
+/** Bubbles drawn from existing code may name files that don't exist; drop those links rather than point at nothing. */
+function dropMissingFiles(root: Chart, known: Set<string>): string[] {
+  const warnings: string[] = [];
+  const check = (b: Bubble) => {
+    if (b.file) b.file = b.file.replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+    if (b.file && !known.has(b.file)) {
+      warnings.push(`${b.name}: the AI named a file that doesn't exist (${b.file}), so it isn't linked.`);
+      delete b.file;
+      delete b.symbol;
+    }
+  };
+  for (const m of root.nodes) {
+    check(m);
+    for (const f of m.children?.nodes ?? []) check(f);
+  }
+  return warnings;
+}
+
 function mergeFiles(a: FileChange[], b: FileChange[]): FileChange[] {
   const map = new Map(a.map((f) => [f.path, f]));
   for (const f of b) map.set(f.path, f);
   return [...map.values()];
 }
 
-/** All projects live as sub-folders of the workspace. */
+export interface WorkspaceOptions {
+  /** Where folders opened from elsewhere are remembered. Default: <root>/.linked-projects.json */
+  registry?: string;
+  /** Folders that must never be opened as a project, nor any folder that contains them (the app's own code). */
+  protectedDirs?: string[];
+  /** Where "Find it for me" looks. Default: the home folder (or CDD_SEARCH_ROOTS). */
+  searchRoots?: string[];
+}
+
+interface LinkedEntry {
+  name: string;
+  dir: string;
+}
+
+/**
+ * The app's projects: sub-folders of the workspace, plus folders opened from elsewhere on disk
+ * ("linked"), remembered in a small registry file. A linked project works exactly like any other.
+ */
 export class Workspace {
   private open = new Map<string, Project>();
+  private links: LinkedEntry[] | null = null;
+  private opening = new Map<string, Promise<{ name: string; chart: ProjectChart; summary?: string; warnings?: string[] }>>();
+  readonly registry: string;
 
-  constructor(readonly root: string, readonly ai: AI) {}
+  constructor(readonly root: string, readonly ai: AI, readonly options: WorkspaceOptions = {}) {
+    this.registry = options.registry ?? path.join(root, ".linked-projects.json");
+  }
+
+  private linked(): LinkedEntry[] {
+    if (this.links) return this.links;
+    try {
+      const raw = JSON.parse(readFileSync(this.registry, "utf8")) as { projects?: unknown };
+      this.links = (Array.isArray(raw.projects) ? raw.projects : [])
+        .filter((e): e is LinkedEntry => !!e && typeof e.name === "string" && typeof e.dir === "string" && slug(e.name) === e.name && path.isAbsolute(e.dir))
+        .filter((e, i, all) => all.findIndex((x) => x.name === e.name) === i);
+    } catch {
+      this.links = [];
+    }
+    return this.links;
+  }
+
+  private saveLinks() {
+    mkdirSync(path.dirname(this.registry), { recursive: true });
+    const tmp = `${this.registry}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ version: 1, projects: this.linked() }, null, 2) + "\n");
+    renameSync(tmp, this.registry);
+  }
 
   async list(): Promise<ProjectSummary[]> {
     await mkdir(this.root, { recursive: true });
@@ -441,12 +539,22 @@ export class Workspace {
         /* not a chart project */
       }
     }
+    for (const l of this.linked()) {
+      if (out.some((p) => p.name === l.name)) continue;
+      try {
+        const pc = JSON.parse(await readFile(path.join(l.dir, CHART_FILE), "utf8")) as ProjectChart;
+        out.push({ name: l.name, idea: pc.idea, hasChart: pc.root.nodes.length > 0, dir: displayPath(l.dir), linked: true });
+      } catch {
+        out.push({ name: l.name, idea: "", hasChart: false, dir: displayPath(l.dir), linked: true, missing: true });
+      }
+    }
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async create(rawName: string, idea: string): Promise<Project> {
     const name = slug(rawName || idea).slice(0, 60);
     if (!idea.trim()) throw new HttpError(400, "Describe the app you want to build");
+    if (this.linked().some((l) => l.name === name)) throw new HttpError(409, `A project named "${name}" already exists`);
     const p = await Project.create(path.join(this.root, name), name, idea.trim(), this.ai);
     this.open.set(name, p);
     p.watch();
@@ -457,12 +565,223 @@ export class Workspace {
     const existing = this.open.get(name);
     if (existing) return existing;
     if (slug(name) !== name) throw new HttpError(400, "Invalid project name");
-    const dir = path.join(this.root, name);
-    if (!existsSync(path.join(dir, CHART_FILE))) throw new HttpError(404, `No project "${name}"`);
+    let dir = path.join(this.root, name);
+    if (!existsSync(path.join(dir, CHART_FILE))) {
+      const link = this.linked().find((l) => l.name === name);
+      if (!link) throw new HttpError(404, `No project "${name}"`);
+      if (!existsSync(path.join(link.dir, CHART_FILE))) throw new HttpError(404, `The folder of "${name}" isn't there any more (${displayPath(link.dir)}). It may have moved; open it again from its new place.`);
+      dir = link.dir;
+    }
     const p = new Project(dir, name, this.ai);
     this.open.set(name, p);
     p.watch();
     return p;
+  }
+
+  /** Stop remembering a folder opened from elsewhere. Its files, chart and git history stay as they are. */
+  forget(name: string) {
+    const links = this.linked();
+    const i = links.findIndex((l) => l.name === name);
+    if (i < 0) throw new HttpError(400, `"${name}" lives in the app's projects folder; delete its folder there to remove it`);
+    links.splice(i, 1);
+    this.saveLinks();
+    this.open.get(name)?.close();
+    this.open.delete(name);
+    return { ok: true };
+  }
+
+  /** The project name a folder already has in the app, if any. */
+  private nameOf(dir: string): string | null {
+    const rel = path.relative(realOrNull(this.root) ?? this.root, dir);
+    if (rel && !rel.includes(path.sep) && !rel.startsWith("..") && !path.isAbsolute(rel) && slug(rel) === rel && existsSync(path.join(dir, CHART_FILE))) return rel;
+    return this.linked().find((l) => (realOrNull(l.dir) ?? l.dir) === dir)?.name ?? null;
+  }
+
+  /** Names being given to folders that are still being opened. */
+  private reserved = new Set<string>();
+
+  private freeName(base: string): string {
+    const taken = (n: string) => existsSync(path.join(this.root, n)) || this.linked().some((l) => l.name === n) || this.reserved.has(n);
+    const s = slug(base).slice(0, 60);
+    let name = s;
+    for (let i = 2; taken(name); i++) name = `${s}-${i}`;
+    return name;
+  }
+
+  /** Look at a folder before opening it: what it is, what opening it would do, and whether it can be opened. */
+  async inspect(input: string): Promise<FolderInspection> {
+    const dir = realFolder(expandPath(input));
+    const display = displayPath(dir);
+    const known = this.nameOf(dir);
+    const hasChart = existsSync(path.join(dir, CHART_FILE));
+    const kind: FolderInspection["kind"] = hasChart ? "chart" : "code";
+    const result: FolderInspection = {
+      path: dir,
+      display,
+      kind,
+      name: known ?? this.freeName(path.basename(dir) || "project"),
+      known: !!known,
+      git: { repo: false, branch: null, changes: 0 },
+      files: 0,
+      languages: [],
+      blocked: null,
+      plan: [],
+    };
+    const block = (why: string) => ((result.blocked = why), result);
+    if (hasChart) {
+      try {
+        const pc = JSON.parse(readFileSync(path.join(dir, CHART_FILE), "utf8")) as ProjectChart;
+        if (!pc || typeof pc !== "object" || !pc.root || !Array.isArray(pc.root.nodes)) throw new Error();
+      } catch {
+        return block("Its .chart/chart.json is damaged, so it can't be opened. Restore it with git, or delete the .chart folder to draw the chart again from the code.");
+      }
+    }
+
+    // Never a folder that holds the app itself or all projects: the home folder, a drive, the projects folder.
+    const realRoot = realOrNull(this.root) ?? this.root;
+    const guarded = [realRoot, ...(this.options.protectedDirs ?? []).map((d) => realOrNull(d) ?? d)];
+    if (path.dirname(dir) === dir || dir === (realOrNull(homeDir()) ?? homeDir())) return block("That's a whole drive or your home folder. Pick the project's own folder.");
+    if (guarded.some((g) => within(g, dir))) return block("That folder holds Chart Driven Development itself or its projects folder. Pick the project's own folder.");
+    if (guarded.slice(1).some((g) => within(dir, g)) && !within(dir, realRoot)) return block("That folder is part of Chart Driven Development itself. Pick one of your own projects.");
+    if (within(dir, realRoot) && !known) return block("That's inside the app's projects folder but isn't a project. Open the project's own folder.");
+
+    const top = await git.topLevel(dir);
+    if (top) {
+      const realTop = realOrNull(top) ?? top;
+      if (realTop !== dir) return block(`This folder is part of a bigger git repo (${displayPath(realTop)}). Open that folder instead, so the app's versions can't touch the rest of the repo.`);
+      result.git.repo = true;
+      result.git.branch = await git.currentBranch(dir);
+      const changed = (await git.changedFiles(dir)).filter((f) => !f.startsWith(".chart/"));
+      result.git.changes = changed.length;
+      const files = await git.listFiles(dir);
+      result.files = files.length;
+      result.languages = languagesOf(files);
+      if (!result.git.branch) return block("The repo isn't on a branch (detached HEAD). Check out a branch first.");
+      if (await git.midOperation(dir)) return block("The repo is in the middle of a merge, rebase or cherry-pick. Finish it first.");
+      if (kind === "code" && changed.length) {
+        return block(`The repo has ${changed.length} uncommitted change${changed.length === 1 ? "" : "s"}. Commit or stash ${changed.length === 1 ? "it" : "them"} first, so your work doesn't get mixed into the app's versions.`);
+      }
+    } else {
+      const counted = await countFiles(dir);
+      result.files = counted.files;
+      result.languages = languagesOf(counted.paths);
+    }
+    if (result.files > MAX_FILES) return block(`That folder has more than ${MAX_FILES.toLocaleString("en")} files, which is too big to chart. Open the project's own folder.`);
+    if (kind === "code" && !result.languages.length) {
+      return block(result.files ? "No source code found in that folder." : "That folder is empty. To start something new, describe it above instead.");
+    }
+
+    if (known) result.plan.push(`It's already in your projects as "${known}".`);
+    else if (kind === "chart") result.plan.push(`It's a Chart Driven Development project. It's added to your projects as "${result.name}".`);
+    if (!result.git.repo) {
+      result.plan.push("Starts a git repo in the folder so every change can be undone. Dependencies, build output, logs and .env files are left out (listed in .git/info/exclude, not a new file).");
+    }
+    if (kind === "code") {
+      result.plan.push(`DeepSeek reads the code (the most telling files, up to about 110 KB) and draws the chart. Your code isn't changed.`);
+      result.plan.push(`The chart is saved in a .chart folder and committed${result.git.branch ? ` to your branch "${result.git.branch}"` : ""}. Every change the app makes after that is its own commit; history is never rewritten.`);
+    } else if (result.git.repo && !known) {
+      result.plan.push(`The app commits its changes to your branch "${result.git.branch}", one commit per change.`);
+    }
+    return result;
+  }
+
+  /** Open a folder from disk: link a chart project, or read a plain codebase and draw its chart. */
+  async openFolder(input: string): Promise<{ name: string; chart: ProjectChart; summary?: string; warnings?: string[] }> {
+    const info = await this.inspect(input);
+    if (info.blocked) throw new HttpError(400, info.blocked);
+    // Opening the same folder twice at once (double click) shares one import.
+    const pending = this.opening.get(info.path);
+    if (pending) return pending;
+    const job = this.openInspected(info).finally(() => this.opening.delete(info.path));
+    this.opening.set(info.path, job);
+    return job;
+  }
+
+  private async openInspected(info: FolderInspection) {
+    const dir = info.path;
+    if (info.known) {
+      const p = this.get(info.name);
+      return { name: p.name, chart: await p.loadChart() };
+    }
+    // A remembered folder that isn't there any more and had this name was most likely moved here: let this one take its name.
+    const base = slug(path.basename(dir) || "project").slice(0, 60);
+    const moved = this.linked().findIndex((l) => l.name === base && !existsSync(path.join(l.dir, CHART_FILE)));
+    if (moved >= 0) {
+      this.linked().splice(moved, 1);
+      this.saveLinks();
+      this.open.get(base)?.close();
+      this.open.delete(base);
+    }
+    // Pick the name again and hold it: another folder with the same name may be opening at the same time.
+    const name = this.freeName(base);
+    this.reserved.add(name);
+    try {
+      return await this.link({ ...info, name });
+    } finally {
+      this.reserved.delete(name);
+    }
+  }
+
+  private async link(info: FolderInspection) {
+    const dir = info.path;
+    if (!info.git.repo) {
+      await git.init(dir);
+      await appendFile(path.join(dir, ".git", "info", "exclude"), `\n# Added by Chart Driven Development\n${DEFAULT_EXCLUDES.join("\n")}\n`);
+      await git.commitAll(dir, "Before Chart Driven Development: the existing files");
+    }
+    const p = new Project(dir, info.name, this.ai);
+    let result: { name: string; chart: ProjectChart; summary?: string; warnings?: string[] };
+    if (info.kind === "chart") {
+      result = { name: info.name, chart: await p.loadChart() };
+    } else {
+      const imported = await p.drawFromCode();
+      result = { name: info.name, ...imported };
+    }
+    this.linked().push({ name: info.name, dir });
+    this.saveLinks();
+    this.open.set(info.name, p);
+    p.watch();
+    return result;
+  }
+
+  /** Search the computer (read-only) for project folders that match a description. */
+  async find(request: string): Promise<FindResult> {
+    const req = request.trim();
+    if (!req) throw new HttpError(400, "Describe the project you're looking for");
+    const roots = this.options.searchRoots ?? searchRoots();
+    const scan = await scanForProjects({ roots });
+    const all = scan.candidates;
+    const notes: string[] = [];
+    if (scan.truncated) notes.push("The search stopped early (lots of folders), so a deeply nested project may have been missed. Use Browse to pick it.");
+    // Shortlist for the AI: keyword matches first, then the most recently changed.
+    const shortlist = all
+      .map((c) => ({ c, score: keywordScore(req, c) }))
+      .sort((a, b) => b.score - a.score || b.c.modified.localeCompare(a.c.modified))
+      .slice(0, 150)
+      .map((x) => x.c);
+    let picks: { path: string; reason: string }[] = [];
+    if (shortlist.length) {
+      try {
+        const known = new Set(shortlist.map((c) => c.path));
+        picks = (await this.ai.pickProjects({ request: req, candidates: shortlist.map((c) => ({ ...c, path: displayPath(c.path) })) }))
+          .map((p) => ({ ...p, path: expandPath(p.path) }))
+          .filter((p, i, arr) => known.has(p.path) && arr.findIndex((x) => x.path === p.path) === i)
+          .slice(0, 6);
+      } catch (e) {
+        notes.push(`The AI couldn't rank the folders (${(e as Error).message}), so these are matched by name.`);
+        picks = shortlist
+          .map((c) => ({ c, score: keywordScore(req, c) }))
+          .filter((x) => x.score > 0)
+          .slice(0, 6)
+          .map((x) => ({ path: x.c.path, reason: "Its name or description matches what you typed." }));
+      }
+    }
+    const byPath = new Map(all.map((c) => [c.path, c]));
+    const matches: FoundProject[] = picks.map((p) => {
+      const c = byPath.get(p.path)!;
+      return { path: c.path, display: displayPath(c.path), name: c.name, description: c.description, reason: p.reason, chart: c.markers.includes(".chart"), modified: c.modified };
+    });
+    return { matches, searched: all.length, roots: roots.map(displayPath), note: notes.join(" ") || null };
   }
 
   closeAll() {

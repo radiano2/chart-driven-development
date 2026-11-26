@@ -57,7 +57,7 @@ export class Assistant {
   transcript: { role: "user" | "assistant"; text: string }[] = [];
   private cancelled = false;
 
-  constructor(private project: Project, private llm: ToolLLM, private opts: AssistantOptions) {}
+  constructor(readonly project: Project, private llm: ToolLLM, private opts: AssistantOptions) {}
 
   private emit(e: AssistantEvent) {
     this.opts.onEvent?.(e);

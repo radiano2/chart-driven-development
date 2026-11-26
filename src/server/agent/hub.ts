@@ -14,6 +14,11 @@ export class AssistantHub {
 
   get(project: Project): Assistant {
     let a = this.assistants.get(project.name);
+    // A forgotten folder's name can be given to another folder later: don't carry the old conversation over.
+    if (a && a.project !== project) {
+      a.cancel();
+      a = undefined;
+    }
     if (!a) {
       a = new Assistant(project, this.llm, {
         onEvent: (event) => project.emit({ type: "assistant", event }),
