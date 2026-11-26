@@ -228,9 +228,11 @@ describe("drawing step by step", () => {
     const p = w.get(r.name);
     const charts: ProjectChart[] = [];
     let drawn: Extract<ServerEvent, { type: "drawn" }> | null = null;
+    const drawingModules: string[] = [];
     p.events.on("event", (ev: ServerEvent) => {
       if (ev.type === "chart") charts.push(structuredClone(ev.chart));
       if (ev.type === "drawn") drawn = ev;
+      if (ev.type === "progress" && ev.module) drawingModules.push(ev.module);
     });
 
     await release(ai); // modules
@@ -248,6 +250,7 @@ describe("drawing step by step", () => {
     await until(() => !!drawn);
     const done = drawn as unknown as Extract<ServerEvent, { type: "drawn" }>;
     assert.equal(done.chart.drawing, undefined);
+    assert.deepEqual(drawingModules, first.root.nodes.map((m) => m.id), "the board is told which module is being drawn, so it can open it");
     assert.ok(done.chart.root.nodes.find((m) => m.id === "notes")?.children?.nodes.some((f) => f.symbol === "addNote"));
     assert.equal(gitIn(dir, "log", "--pretty=%s", "-1"), "Draw chart from the existing code");
     assert.equal(gitIn(dir, "status", "--porcelain"), "");

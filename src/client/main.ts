@@ -173,7 +173,10 @@ async function goHome() {
   events?.close();
   events = null;
   // Leaving a chart that's still being drawn: it keeps drawing, and opening the project again shows where it got to.
-  stopReveal();
+  if (reveal) {
+    stopReveal();
+    setBusy(null);
+  }
   if (state.drawingChart) {
     state.drawingChart = false;
     setBusy(null);
@@ -557,7 +560,7 @@ function renderRevealBar() {
   view.bottomInset = r ? 56 : 0;
   if (!r) return bar.replaceChildren();
   const total = allKeys(r.target).size;
-  const shown = Math.min(r.visible.size, total);
+  const shown = total - pendingSteps(r.target, r.visible).length;
   const waiting = !r.done && shown >= total;
   const parts: Child[] = [
     h("span", { class: "spinner" }),
@@ -633,11 +636,13 @@ async function openLevel(level: Level, focus?: string, auto = false) {
     return;
   }
   const from = state.level;
+  const project = state.project;
   moving = true;
   try {
     view.stopRun();
     if (from === "root") await view.zoomInto(level);
     else await view.zoomAway();
+    if (state.project !== project || !state.chart) return; // left the project during the zoom
     state.level = level;
     state.selected = null;
     resetPanelState();
@@ -697,6 +702,7 @@ function currentBubble(): Bubble | undefined {
 function renderChart(keepView = false, animate = false, enter?: { how: "in" | "out"; from?: string }) {
   const chart = currentChart();
   if (!chart) {
+    if (!state.chart || state.level === "root") return;
     state.level = "root";
     return renderChart();
   }
