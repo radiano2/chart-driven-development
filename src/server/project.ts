@@ -711,7 +711,8 @@ export class Workspace {
       const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
       const trash = path.join(this.root, ".removed");
       await mkdir(trash, { recursive: true });
-      const dest = path.join(trash, `${name}-${stamp}`);
+      let dest = path.join(trash, `${name}-${stamp}`);
+      for (let i = 2; existsSync(dest); i++) dest = path.join(trash, `${name}-${stamp}-${i}`);
       await rename(own, dest);
       message = `Removed "${name}" from the list. Its folder was moved to ${displayPath(dest)}; move it back into ${displayPath(this.root)} to restore it.`;
     } else {

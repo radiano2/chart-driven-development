@@ -55,8 +55,10 @@ describe("removing projects", () => {
     assert.equal(moved.length, 1);
     assert.ok(existsSync(path.join(tmp, "projects", ".removed", moved[0], ".chart", "chart.json")));
     assert.equal((await call("GET", "/api/projects/keep-me")).status, 404);
-    // The name is free again.
+    // The name is free again, and removing it again in the same second doesn't clash.
     await makeProject("keep-me");
+    assert.equal((await call("POST", "/api/projects/keep-me/remove", { deleteFolder: false })).status, 200);
+    assert.equal((await readdir(path.join(tmp, "projects", ".removed"))).length, 2);
   });
 
   it("deletes the folder only with the project's name typed", async () => {

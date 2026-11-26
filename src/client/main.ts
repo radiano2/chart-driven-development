@@ -253,6 +253,7 @@ function removeDialog(p: ProjectSummary) {
     ),
   );
   typed.addEventListener("input", update);
+  typed.addEventListener("keydown", (e) => e.key === "Enter" && go.click());
   go.addEventListener("click", () => {
     if (go.disabled) return;
     go.disabled = true;
@@ -507,6 +508,9 @@ function renderPanel() {
   const panel = $("panel");
   // The run chat re-renders on every step: keep the cursor in its question box.
   const typing = document.activeElement instanceof HTMLTextAreaElement && document.activeElement.classList.contains("run-input");
+  // ...and leave the chat where the user scrolled it, unless they were following along at the bottom.
+  const oldLog = panel.querySelector<HTMLElement>(".run-chat .chat-log");
+  runScroll = oldLog ? { top: oldLog.scrollTop, atBottom: oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 40 } : { top: 0, atBottom: true };
   panel.replaceChildren();
   if (!state.chart) return;
   if (state.run) {
@@ -846,9 +850,12 @@ function runPanel(run: RunState) {
       ),
     ),
   );
-  requestAnimationFrame(() => (log.scrollTop = log.scrollHeight));
+  const scroll = runScroll;
+  requestAnimationFrame(() => (log.scrollTop = scroll.atBottom ? log.scrollHeight : scroll.top));
   return wrap;
 }
+
+let runScroll = { top: 0, atBottom: true };
 
 function closeRun() {
   view.stopRun();
