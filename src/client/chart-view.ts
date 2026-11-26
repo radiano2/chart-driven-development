@@ -62,6 +62,8 @@ export class ChartView {
   /** What the last render showed, so the next one can animate what's new. */
   private last: { key: string; pos: Map<string, Pt>; edges: Set<string>; inside: Map<string, number> } | null = null;
   private smoothTimer = 0;
+  /** The user panned or zoomed since the last fit: growing charts then stop re-centring on their own. */
+  private touched = false;
 
   constructor(private svg: SVGSVGElement, private cb: ChartViewCallbacks) {
     const defs = el("defs", {}, svg);
@@ -86,6 +88,7 @@ export class ChartView {
       if (!drag) return;
       this.view.x = drag.vx + (e.clientX - drag.x);
       this.view.y = drag.vy + (e.clientY - drag.y);
+      this.touched = true;
       this.applyView();
     });
     const end = (e: PointerEvent) => {
@@ -111,6 +114,7 @@ export class ChartView {
         this.view.x = mx - ((mx - this.view.x) * k) / this.view.k;
         this.view.y = my - ((my - this.view.y) * k) / this.view.k;
         this.view.k = k;
+        this.touched = true;
         this.applyView();
       },
       { passive: false },
@@ -135,10 +139,12 @@ export class ChartView {
     const pad = 40;
     const k = Math.min(1.2, (r.width - pad * 2) / this.bounds.w, (r.height - pad * 2) / this.bounds.h);
     this.view = { k, x: (r.width - this.bounds.w * k) / 2, y: (r.height - this.bounds.h * k) / 2 };
+    this.touched = false;
     this.applyView();
   }
 
   zoomBy(f: number) {
+    this.touched = true;
     const r = this.svg.getBoundingClientRect();
     const k = Math.min(2.5, Math.max(0.25, this.view.k * f));
     this.view.x = r.width / 2 - ((r.width / 2 - this.view.x) * k) / this.view.k;
@@ -200,7 +206,9 @@ export class ChartView {
     };
 
     this.setSelected(this.selected && this.nodeEls.has(this.selected) ? this.selected : null);
-    if (opts.glide) requestAnimationFrame(() => this.smoothly(() => this.fit()));
+    if (opts.glide) {
+      if (!this.touched) requestAnimationFrame(() => this.smoothly(() => this.fit()));
+    }
     else if (!opts.keepView) requestAnimationFrame(() => this.fit());
   }
 

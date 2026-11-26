@@ -228,7 +228,7 @@ function onServerEvent(project: string, ev: ServerEvent) {
     toast(`The chart is drawn. ${ev.summary} Double-click a module to open it.${extra}`, ev.warnings.length ? "error" : "info");
   } else if (ev.type === "draw-failed") {
     stopDrawingUi();
-    toast(`Couldn't draw the chart: ${ev.message} The folder is as it was; open it again to try again.`, "error");
+    toast(`Couldn't draw the chart: ${ev.message} The half-drawn chart was removed and your code wasn't touched. Open the folder again to retry.`, "error");
     void goHome();
   } else if (ev.type === "design") {
     state.designData = ev.design;
