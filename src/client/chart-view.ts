@@ -133,12 +133,13 @@ export class ChartView {
     this.smoothTimer = window.setTimeout(() => this.root.classList.remove("smooth"), 700);
   }
 
+  /** Room kept free at the bottom of the board when fitting (for a bar floating there). */
+  bottomInset = 0;
+
   fit() {
-    const r = this.svg.getBoundingClientRect();
-    if (!this.bounds.w || !r.width) return;
-    const pad = 40;
-    const k = Math.min(1.2, (r.width - pad * 2) / this.bounds.w, (r.height - pad * 2) / this.bounds.h);
-    this.view = { k, x: (r.width - this.bounds.w * k) / 2, y: (r.height - this.bounds.h * k) / 2 };
+    const v = this.fitView();
+    if (!v) return;
+    this.view = v;
     this.touched = false;
     this.applyView();
   }
@@ -153,8 +154,9 @@ export class ChartView {
     const r = this.svg.getBoundingClientRect();
     if (!this.bounds.w || !r.width) return null;
     const pad = 40;
-    const k = Math.min(1.2, (r.width - pad * 2) / this.bounds.w, (r.height - pad * 2) / this.bounds.h);
-    return { k, x: (r.width - this.bounds.w * k) / 2, y: (r.height - this.bounds.h * k) / 2 };
+    const height = r.height - this.bottomInset;
+    const k = Math.min(1.2, (r.width - pad * 2) / this.bounds.w, (height - pad * 2) / this.bounds.h);
+    return { k, x: (r.width - this.bounds.w * k) / 2, y: (height - this.bounds.h * k) / 2 };
   }
 
   /** The view that makes bubble `id` fill most of the screen. */

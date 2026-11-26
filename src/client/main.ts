@@ -427,6 +427,8 @@ interface Reveal {
 
 let reveal: Reveal | null = null;
 const SPEEDS = [1, 2, 4];
+/** How long a level takes to settle after a zoom (chart-view's "settle"); drawing on it sooner cuts that short. */
+const SETTLE_MS = 620;
 
 function startReveal(target: ProjectChart, showExisting: boolean) {
   stopReveal();
@@ -481,11 +483,11 @@ async function followTo(r: Reveal, level: Level) {
     await sleep(650 / r.speed, alive); // a moment to see the finished module
     if (!alive()) return;
     await openLevel("root", undefined, true);
-    if (level !== "root") await sleep(380 / r.speed, alive);
+    await sleep(SETTLE_MS, alive);
   }
   if (level !== "root" && alive() && state.level !== level) {
     await openLevel(level, undefined, true);
-    await sleep(320 / r.speed, alive);
+    await sleep(SETTLE_MS, alive);
   }
 }
 
@@ -527,7 +529,10 @@ async function runReveal(r: Reveal) {
   if (!alive()) return;
   if (r.follow && state.level !== "root") {
     await sleep(700 / r.speed, alive);
-    if (alive() && r.follow) await openLevel("root", undefined, true);
+    if (alive() && r.follow) {
+      await openLevel("root", undefined, true);
+      await sleep(SETTLE_MS, alive);
+    }
   }
   if (!alive()) return;
   reveal = null;
@@ -539,6 +544,7 @@ async function runReveal(r: Reveal) {
 }
 
 function showRevealed(r: Reveal) {
+  // During a zoom only the data changes: the level drawn when the zoom ends shows it.
   state.chart = visiblePart(r.target, r.visible);
   if (!$("workspace").hidden && !moving) renderChart(true, true);
   renderRevealBar();
@@ -548,6 +554,7 @@ function renderRevealBar() {
   const bar = $("reveal-bar");
   const r = reveal;
   bar.hidden = !r;
+  view.bottomInset = r ? 56 : 0;
   if (!r) return bar.replaceChildren();
   const total = allKeys(r.target).size;
   const shown = Math.min(r.visible.size, total);
@@ -639,8 +646,6 @@ async function openLevel(level: Level, focus?: string, auto = false) {
   } finally {
     moving = false;
   }
-  // Parts that arrived during the zoom.
-  if (reveal) showRevealed(reveal);
 }
 
 function resetPanelState() {
