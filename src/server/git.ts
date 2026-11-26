@@ -1,0 +1,79 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import type { HistoryEntry } from "../shared/types.ts";
+
+const run = promisify(execFile);
+
+const IDENTITY = ["-c", "user.name=Chart Driven Development", "-c", "user.email=cdd@localhost"];
+
+export async function git(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await run("git", args, { cwd, maxBuffer: 32 * 1024 * 1024 });
+  return stdout;
+}
+
+async function hasIdentity(cwd: string): Promise<boolean> {
+  try {
+    return (await git(cwd, ["config", "user.email"])).trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function init(cwd: string): Promise<void> {
+  await git(cwd, ["init", "-q", "-b", "main"]);
+}
+
+/** Stage everything and commit. Returns false when there was nothing to commit. */
+export async function commitAll(cwd: string, message: string): Promise<boolean> {
+  await git(cwd, ["add", "-A"]);
+  const status = await git(cwd, ["status", "--porcelain"]);
+  if (!status.trim()) return false;
+  const id = (await hasIdentity(cwd)) ? [] : IDENTITY;
+  await git(cwd, [...id, "commit", "-q", "-m", message]);
+  return true;
+}
+
+/** Paths with uncommitted changes (including untracked files). */
+export async function changedFiles(cwd: string): Promise<string[]> {
+  const out = await git(cwd, ["status", "--porcelain", "-uall"]);
+  return out
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => l.slice(3).replace(/^"|"$/g, ""))
+    .map((p) => (p.includes(" -> ") ? p.split(" -> ")[1] : p));
+}
+
+/** Diff of uncommitted changes, untracked files included. */
+export async function workingDiff(cwd: string): Promise<string> {
+  await git(cwd, ["add", "-A", "--intent-to-add"]);
+  return git(cwd, ["diff", "HEAD"]);
+}
+
+export async function history(cwd: string, limit = 50): Promise<HistoryEntry[]> {
+  try {
+    const out = await git(cwd, ["log", `-${limit}`, "--pretty=format:%H%x1f%s%x1f%cI"]);
+    return out
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => {
+        const [sha, message, date] = l.split("\x1f");
+        return { sha, message, date };
+      });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Restore the whole project (code + chart) to how it was at `sha`, as a new commit.
+ * History is never rewritten, so a restore can itself be undone.
+ */
+export async function restore(cwd: string, sha: string, message: string): Promise<boolean> {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) throw new Error("Invalid version id");
+  // Load `sha`'s tree into the index and write it out.
+  await git(cwd, ["read-tree", sha]);
+  await git(cwd, ["checkout-index", "-a", "-f"]);
+  // Files added after `sha` are now untracked: delete them (ignored files are kept).
+  await git(cwd, ["clean", "-f", "-d", "-q", "-e", "node_modules"]);
+  return commitAll(cwd, message);
+}

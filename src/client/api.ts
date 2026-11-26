@@ -1,0 +1,64 @@
+import type {
+  Bubble,
+  HistoryEntry,
+  Level,
+  ProjectChart,
+  ProjectSummary,
+  Recommendation,
+  RecommendationOption,
+  RunTrace,
+  ServerEvent,
+  Stack,
+  StackProposal,
+} from "../shared/types.ts";
+
+async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body ? { "content-type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as { error?: string }).error || `Request failed (${res.status})`);
+  return data as T;
+}
+
+const P = (name: string) => `/api/projects/${encodeURIComponent(name)}`;
+
+export interface ChangeResult {
+  chart: ProjectChart;
+  summary?: string;
+  files?: string[];
+  warnings?: string[];
+}
+
+export const api = {
+  info: () => call<{ ai: string; workspace: string }>("GET", "/api/info"),
+  projects: () => call<ProjectSummary[]>("GET", "/api/projects"),
+  create: (name: string, idea: string) => call<{ name: string; chart: ProjectChart }>("POST", "/api/projects", { name, idea }),
+  open: (name: string) => call<{ name: string; dir: string; chart: ProjectChart; outside: string[] }>("GET", P(name)),
+  stack: (name: string) => call<StackProposal>("POST", `${P(name)}/stack`),
+  generate: (name: string, stack: Stack) => call<{ chart: ProjectChart }>("POST", `${P(name)}/generate`, { stack }),
+  recommend: (name: string, level: Level, bubbleId: string, request: string) =>
+    call<Recommendation>("POST", `${P(name)}/recommend`, { level, bubbleId, request }),
+  apply: (name: string, level: Level, bubbleId: string, request: string, option: RecommendationOption) =>
+    call<ChangeResult>("POST", `${P(name)}/apply`, { level, bubbleId, request, option }),
+  implement: (name: string, level: Level, bubbleId: string) => call<ChangeResult>("POST", `${P(name)}/implement`, { level, bubbleId }),
+  addBubble: (name: string, level: Level, bubble: Partial<Bubble>) =>
+    call<{ chart: ProjectChart; bubble: Bubble }>("POST", `${P(name)}/bubbles`, { level, bubble }),
+  removeBubble: (name: string, level: Level, bubbleId: string) => call<ChangeResult>("POST", `${P(name)}/bubbles/remove`, { level, bubbleId }),
+  addEdge: (name: string, level: Level, edge: { from: string; to: string; data: string }) =>
+    call<ChangeResult>("POST", `${P(name)}/edges`, { level, edge }),
+  run: (name: string, level: Level) => call<RunTrace>("POST", `${P(name)}/run`, { level }),
+  history: (name: string) => call<HistoryEntry[]>("GET", `${P(name)}/history`),
+  undo: (name: string) => call<ChangeResult>("POST", `${P(name)}/undo`),
+  restore: (name: string, sha: string) => call<ChangeResult>("POST", `${P(name)}/restore`, { sha }),
+  sync: (name: string) => call<ChangeResult>("POST", `${P(name)}/sync`),
+  acceptOutside: (name: string) => call<{ ok: boolean }>("POST", `${P(name)}/accept-outside`),
+  file: (name: string, path: string) => call<{ path: string; content: string }>("GET", `${P(name)}/file?path=${encodeURIComponent(path)}`),
+  events(name: string, onEvent: (e: ServerEvent) => void): EventSource {
+    const es = new EventSource(`${P(name)}/events`);
+    es.onmessage = (m) => onEvent(JSON.parse(m.data) as ServerEvent);
+    return es;
+  },
+};
