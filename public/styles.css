@@ -365,3 +365,21 @@ button.primary.danger { background: var(--danger); border-color: var(--danger); 
   .chart > g.zoom-in, .chart > g.zoom-out, .chart > g.settle { transition: none; }
   .run-msg, .modal-overlay { animation: none; }
 }
+
+/* Drawing the chart live: progress, speed and "Show all", floating at the bottom of the board. */
+.reveal-bar {
+  position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 3;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center;
+  width: max-content; max-width: calc(100% - 32px); padding: 8px 10px 8px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 99px; box-shadow: var(--shadow);
+  font-size: 13px; animation: reveal-bar-in 0.35s ease-out;
+}
+.reveal-bar .reveal-text { font-weight: 500; color: var(--accent); white-space: nowrap; }
+.reveal-bar .reveal-meter { width: 90px; height: 6px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
+.reveal-bar .reveal-meter span { display: block; height: 100%; background: var(--accent); border-radius: inherit; transition: width 0.4s ease; }
+.reveal-bar button { padding: 4px 12px; border-radius: 99px; font-size: 12.5px; }
+@keyframes reveal-bar-in { from { opacity: 0; transform: translate(-50%, 10px); } }
+@media (prefers-reduced-motion: reduce) {
+  .reveal-bar { animation: none; }
+  .reveal-bar .reveal-meter span { transition: none; }
+}

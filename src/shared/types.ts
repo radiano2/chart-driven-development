@@ -299,7 +299,8 @@ export type AssistantEvent =
   | { kind: "reply"; text: string; changed: string[] };
 
 export type ServerEvent =
-  | { type: "progress"; message: string }
+  /** `module`: while a chart is drawn from code, the module whose functions the AI is drawing right now. */
+  | { type: "progress"; message: string; module?: string }
   | { type: "chart"; chart: ProjectChart }
   | { type: "outside-change"; files: string[] }
   /** Drawing the chart of an opened codebase finished (each step before arrives as a "chart" event). */
