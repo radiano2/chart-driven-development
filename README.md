@@ -13,7 +13,7 @@ npm start                   # http://localhost:4317
 
 Then click **⚙ Settings** (top right), paste your DeepSeek API key and press **Save**. It's checked against DeepSeek right away and takes effect without a restart.
 The key is stored only on this computer in `.cdd/settings.json` (git-ignored, readable only by you) and is never sent back to the browser.
-`DEEPSEEK_API_KEY` in `.env` still works too; a key saved in Settings takes priority. From a terminal: `npm run cdd -- set-key`.
+`DEEPSEEK_API_KEY` in `.env` still works too; a key saved in Settings takes priority. From a terminal: `npm run cdd -- set-key` (typed hidden). Only a key DeepSeek rejects (401) is refused; if the account has no balance or DeepSeek can't be reached, the key is saved with a warning.
 
 No API key yet? `npm run start:mock` runs the whole flow offline with a canned "todo app" so you can click around.
 
@@ -61,6 +61,7 @@ npm run cdd -- projects
 npm run cdd -- chart todo-app todos
 npm run cdd -- ask todo-app "add a priority to todos and show it in the list"
 npm run cdd -- chat todo-app          # conversation; type exit to quit
+npm run cdd -- sync todo-app          # outside edits → update the chart (or: keep)
 npm run cdd -- versions todo-app
 npm run cdd -- undo todo-app
 npm run cdd -- folder todo-app --open
@@ -97,6 +98,8 @@ These weren't specified, so I picked something reasonable. Easy to change.
 
 - **Outside edits** are detected by polling `git status` every 1.5 s while the project is open (the app commits everything it does itself, so anything uncommitted came from outside). This survives editors and git replacing files, which recursive file watching didn't.
 - **"Keep, don't update"** on outside edits commits them as-is so the warning goes away.
+- The **assistant won't start a turn while there are outside edits** you haven't decided about; it asks you to choose "Update the chart" or "Keep, don't update" first (`cdd sync` / `cdd keep` in a terminal). Otherwise your edits would end up inside the assistant's version.
+- The assistant reads long files in ~48 KB parts and drops old tool output when the conversation gets too long, so it stays within DeepSeek's context window.
 - **Run** works at the level you're looking at (modules, or a module's functions). It doesn't execute your code.
 - **Arrows into other modules** are written as `module-id/function-id` and drawn as dashed "ghost" bubbles.
 - **Removing a bubble** removes it from the chart only; its code stays (ask the AI to rewrite if you want code removed).

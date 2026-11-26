@@ -44,8 +44,8 @@ function realOrNull(p: string): string | null {
 }
 
 /**
- * Resolve a project-relative path, refusing anything that escapes the folder (including through symlinks)
- * or touches .git (at any depth) or .chart. Used for every file the app or the AI reads or writes.
+ * Resolve a project-relative path, refusing anything that escapes the folder (including through symlinks),
+ * touches a .git folder (at any depth) or the project's own .chart folder (at the root). Used for every file the app or the AI reads or writes.
  */
 export function safePath(root: string, rel: string): string {
   const escape = () => new HttpError(400, `Path escapes project: ${rel}`);

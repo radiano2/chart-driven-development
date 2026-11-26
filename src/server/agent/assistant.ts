@@ -12,6 +12,13 @@ import { runTool, TOOL_DEFS } from "./tools.ts";
 const SKILL_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../skills/cdd-assistant.md");
 const MAX_STEPS = 30;
 const MAX_HISTORY = 60;
+/** Rough budget for the conversation sent to the model (~4 chars per token, leaving room for the guide and reply). */
+const MAX_HISTORY_CHARS = 140_000;
+const MAX_TOOL_RESULT = 50_000;
+
+function size(m: ChatMessage): number {
+  return (m.content?.length ?? 0) + ("tool_calls" in m && m.tool_calls ? JSON.stringify(m.tool_calls).length : 0);
+}
 
 export function loadSkill(): string {
   return readFileSync(SKILL_PATH, "utf8");
@@ -59,6 +66,25 @@ Modules:
 ${modules}`;
   }
 
+  /**
+   * Keep what we send under the model's context window: drop whole older turns first, then blank out the oldest
+   * tool outputs of the current turn (the calls stay, so the conversation remains valid).
+   */
+  private compactHistory() {
+    const total = () => this.history.reduce((n, m) => n + size(m), 0);
+    while (total() > MAX_HISTORY_CHARS) {
+      const nextUser = this.history.findIndex((m, i) => i > 0 && m.role === "user");
+      if (nextUser <= 0) break;
+      this.history = this.history.slice(nextUser);
+    }
+    const tools = this.history.map((m, i) => (m.role === "tool" ? i : -1)).filter((i) => i >= 0);
+    for (const i of tools.slice(0, -2)) {
+      if (total() <= MAX_HISTORY_CHARS) break;
+      const m = this.history[i] as Extract<ChatMessage, { role: "tool" }>;
+      if (m.content.length > 200) this.history[i] = { ...m, content: "(output removed to save space; run the tool again if you need it)" };
+    }
+  }
+
   private trimHistory() {
     if (this.history.length <= MAX_HISTORY) return;
     // Cut at a user message so tool results never lose their call.
@@ -75,8 +101,14 @@ ${modules}`;
   ask(text: string, context?: string): Promise<{ reply: string; changed: string[]; committed: boolean }> {
     return this.project.exclusive(async () => {
       this.cancelled = false;
-      // Edits made outside the app before this turn get their own commit, so undoing the turn never undoes them.
-      await this.project.commit("Save outside edits before assistant turn");
+      // Edits made outside the app are the user's to resolve (update the chart from them, or keep them as they are).
+      // Don't start a turn on top of them: it would either fold them into the assistant's version or decide for the user.
+      const outside = (await git.changedFiles(this.project.dir)).filter((f) => !f.startsWith(".chart/"));
+      if (outside.length) {
+        const reply = `${outside.length} file${outside.length > 1 ? "s were" : " was"} changed outside the app (${outside.slice(0, 5).join(", ")}${outside.length > 5 ? ", …" : ""}). First choose "Update the chart" or "Keep, don't update" in the banner above the chart (in a terminal: \`cdd sync ${this.project.name}\` or \`cdd keep ${this.project.name}\`), then ask me again.`;
+        this.emit({ kind: "reply", text: reply, changed: [] });
+        return { reply, changed: [], committed: false };
+      }
       const ctx = {
         project: this.project,
         approve: async (command: string) => !this.cancelled && (await this.opts.approve(command)),
@@ -95,6 +127,7 @@ ${modules}`;
             break;
           }
           this.emit({ kind: "thinking" });
+          this.compactHistory();
           const msg = await this.llm.chat([system, ...this.history], TOOL_DEFS);
           this.history.push({ role: "assistant", content: msg.content, tool_calls: msg.tool_calls });
           if (!msg.tool_calls?.length) {
@@ -119,6 +152,7 @@ ${modules}`;
               result = `Error: ${(e as Error).message}`;
             }
             this.emit({ kind: "tool-result", name: call.function.name, ok, summary: short(result) });
+            if (result.length > MAX_TOOL_RESULT) result = result.slice(0, MAX_TOOL_RESULT) + "\n…(cut to save space)";
             this.history.push({ role: "tool", tool_call_id: call.id, content: result });
           }
           if (step === MAX_STEPS - 1 && !reply) reply = "I stopped after many steps without finishing. Tell me how you'd like to continue.";

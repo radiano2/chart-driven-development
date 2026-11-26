@@ -108,6 +108,7 @@ describe("assistant", () => {
     await symlink(outside, path.join(project.dir, "link-out"));
     await symlink(path.join(project.dir, ".git"), path.join(project.dir, "link-git"));
     await symlink(path.join(outside, "nope.txt"), path.join(project.dir, "dangling.txt"));
+    await project.commit("add test symlinks"); // otherwise they count as outside edits
     const llm = new ScriptedLLM([
       [
         ...sneaky.map((p) => ({ name: "write_file", args: { path: p, content: "[core]\n\tfsmonitor = touch pwned\n" } })),
@@ -127,21 +128,54 @@ describe("assistant", () => {
     await project.commit("clean up symlinks");
   });
 
-  it("commits files changed by commands too, and keeps earlier outside edits in their own commit", async () => {
-    await writeFile(path.join(project.dir, "outside.txt"), "edited in my editor");
+  it("commits files changed by commands too", async () => {
     const llm = new ScriptedLLM([[{ name: "run_command", args: { command: "echo lock > made-by-command.txt" } }]]);
     const r = await new Assistant(project, llm, { approve: async () => true }).ask("make a file with a command");
     assert.equal(r.committed, true);
     assert.deepEqual(r.changed, ["made-by-command.txt"]);
-    const [latest, previous] = await project.history();
-    assert.match(latest.message, /^Assistant: make a file/);
-    assert.equal(previous.message, "Save outside edits before assistant turn");
+    assert.match((await project.history())[0].message, /^Assistant: make a file/);
     assert.deepEqual(await project.checkOutside(true), []);
+  });
+
+  it("won't start while there are outside edits the user hasn't decided about", async () => {
+    await writeFile(path.join(project.dir, "outside.txt"), "edited in my editor");
+    const llm = new ScriptedLLM([[{ name: "list_files" }]]);
+    const before = (await project.history()).length;
+    const r = await new Assistant(project, llm, { approve: async () => false }).ask("do something");
+    assert.match(r.reply, /changed outside the app \(outside\.txt\).*Update the chart.*cdd sync todo/s);
+    assert.equal(llm.seen.length, 0, "the model is not called");
+    assert.equal((await project.history()).length, before, "nothing committed for the user");
+    assert.deepEqual(await project.checkOutside(true), ["outside.txt"]);
+    await project.acceptOutside();
   });
 
   it("reports nothing saved when nothing changed", async () => {
     const r = await new Assistant(project, new ScriptedLLM([[{ name: "list_files" }]]), { approve: async () => false }).ask("look around");
     assert.deepEqual([r.committed, r.changed], [false, []]);
+  });
+
+  it("reads long files in parts that fit the model", async () => {
+    const big = Array.from({ length: 20_000 }, (_, i) => `line ${i + 1} ${"x".repeat(20)}`).join("\n");
+    await writeFile(path.join(project.dir, "big.txt"), big);
+    await project.commit("add big file");
+    const llm = new ScriptedLLM([[{ name: "read_file", args: { path: "big.txt" } }, { name: "read_file", args: { path: "big.txt", from_line: 19_999 } }]]);
+    await new Assistant(project, llm, { approve: async () => false }).ask("read the big file");
+    const [first, last] = toolResults(llm);
+    assert.ok(first.length < 50_000, `first part is ${first.length} chars`);
+    assert.match(first, /^\[lines 1-\d+ of 20000\. Call read_file with from_line=\d+ for more/);
+    assert.match(last, /^\[lines 19999-20000 of 20000\.\]\nline 19999 /);
+  });
+
+  it("keeps the conversation it sends within the model's budget", async () => {
+    const llm = new ScriptedLLM(Array.from({ length: 6 }, () => [{ name: "read_file", args: { path: "big.txt" } }]));
+    const a = new Assistant(project, llm, { approve: async () => false });
+    await a.ask("read it many times");
+    for (const sent of llm.seen) {
+      const chars = sent.slice(1).reduce((n, m) => n + (m.content?.length ?? 0), 0);
+      assert.ok(chars <= 150_000, `sent ${chars} chars of conversation`);
+    }
+    await rm(path.join(project.dir, "big.txt"));
+    await project.commit("remove big file");
   });
 
   it("asks before starting the app", async () => {
@@ -195,6 +229,32 @@ describe("assistant", () => {
     const r = await new Assistant(project, broken, { approve: async () => false }).ask("hello");
     assert.match(r.reply, /401 bad key/);
     assert.ok((await project.history()).length > 0);
+  });
+});
+
+describe("start_app", () => {
+  it("reports a spawn failure instead of crashing the server", async () => {
+    const gone = await ws.create("gone", "todo app");
+    gone.close();
+    await gone.generate((await gone.proposeStack()).recommended);
+    const llm = new ScriptedLLM([[{ name: "start_app" }]]);
+    const a = new Assistant(gone, llm, {
+      approve: async () => {
+        await rm(gone.dir, { recursive: true, force: true }); // folder disappears while the approval card is up
+        return true;
+      },
+    });
+    let crashed: unknown = null;
+    const onCrash = (e: unknown) => (crashed = e);
+    process.on("uncaughtException", onCrash);
+    try {
+      await a.ask("start it").catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 200));
+    } finally {
+      process.off("uncaughtException", onCrash);
+    }
+    assert.equal(crashed, null);
+    assert.match(toolResults(llm)[0], /could not start|ENOENT|Error/);
   });
 });
 

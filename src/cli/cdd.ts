@@ -1,6 +1,7 @@
 #!/usr/bin/env -S npx tsx
 // `cdd`: drive Chart Driven Development from a terminal, headless. Same projects, tools and versions as the web app.
 import readline from "node:readline/promises";
+import { Writable } from "node:stream";
 import { Assistant } from "../server/agent/assistant.ts";
 import { runTool, stopApp } from "../server/agent/tools.ts";
 import { setup } from "../server/index.ts";
@@ -13,6 +14,8 @@ const HELP = `Chart Driven Development, command line
   cdd chart <project> [module]       print the chart (or one module's inner chart)
   cdd ask <project> <message…>       ask the assistant once, then exit
   cdd chat <project>                 talk to the assistant (type "exit" to quit, "reset" to forget)
+  cdd sync <project>                 read files changed outside the app and update the chart
+  cdd keep <project>                 keep outside edits without updating the chart
   cdd versions <project>             list saved versions
   cdd undo <project>                 go back one version
   cdd restore <project> <version>    restore a saved version
@@ -48,11 +51,11 @@ async function main(argv: string[]) {
   if (cmd === "set-key") {
     const key = (await readSecret("DeepSeek API key (hidden): ")).trim();
     if (!key) throw new Error("No key entered");
-    // Check before saving, so a typo never replaces a working key.
+    // Refuse only a key DeepSeek says is wrong; no balance or no network isn't the key's fault.
     const t = await cfg.brain.settings.test(key);
-    if (!t.ok) throw new Error(`Not saved: ${t.message}`);
+    if (t.invalid) throw new Error(`Not saved: ${t.message}`);
     cfg.brain.update({ deepseekApiKey: key });
-    out("The key works and is saved.");
+    out(t.ok ? "The key works and is saved." : `Saved. Note: ${t.message}`);
     return;
   }
   if (cmd === "projects") {
@@ -76,6 +79,15 @@ async function main(argv: string[]) {
       for (const e of [...c.edges].sort((a, b) => a.order - b.order)) out(`  ${e.order}. ${e.from} → ${e.to}  (${e.data})`);
       return;
     }
+    case "sync": {
+      const changed = await project.checkOutside(true);
+      if (!changed.length) return out("No outside edits.");
+      const r = await project.syncFromCode();
+      return out(`Updated the chart from ${changed.length} changed file(s). ${r.summary}`);
+    }
+    case "keep":
+      await project.acceptOutside();
+      return out("Kept the outside edits without updating the chart.");
     case "versions":
       for (const h of await project.history()) out(`${h.sha.slice(0, 7)}  ${h.date}  ${h.message.split("\n")[0]}`);
       return;
@@ -140,12 +152,11 @@ async function converse(project: ReturnType<ReturnType<typeof setup>["ws"]["get"
   }
 }
 
-/** Read a line without echoing it (falls back to a plain read when stdin isn't a terminal). */
+/** Read a line without echoing it: readline writes to a muted stream, and we write the prompt ourselves. */
 async function readSecret(prompt: string): Promise<string> {
   process.stderr.write(prompt);
-  const rl = readline.createInterface({ input: process.stdin, output: process.stderr, terminal: process.stdin.isTTY === true });
-  // Swallow readline's echo of the typed characters.
-  (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = () => undefined;
+  const muted = new Writable({ write: (_chunk, _enc, cb) => cb() });
+  const rl = readline.createInterface({ input: process.stdin, output: muted, terminal: process.stdin.isTTY === true });
   try {
     return await rl.question("");
   } finally {

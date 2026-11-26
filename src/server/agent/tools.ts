@@ -58,7 +58,7 @@ export const TOOL_DEFS: ToolDef[] = [
   tool("get_project", "Name, idea, tech stack and folder of the current project."),
   tool("get_chart", "Get the root chart (modules) or one module's inner chart of functions.", { level: str('"root" or a module id') }),
   tool("list_files", "List files in the project (or a sub-folder), skipping .git, node_modules and build output.", { dir: str("Sub-folder, default the project root") }),
-  tool("read_file", "Read a text file from the project.", { path: str("Path relative to the project folder") }, ["path"]),
+  tool("read_file", `Read a text file from the project. Long files come back in parts of about 48 KB; pass from_line to continue.`, { path: str("Path relative to the project folder"), from_line: { type: "integer", description: "First line to return (1-based), for long files" } }, ["path"]),
   tool("search_code", "Find lines containing some text (case-insensitive) across the project's files.", { text: str("Text to look for") }, ["text"]),
   tool("write_file", "Create or fully replace a file in the project. Give the COMPLETE content.", { path: str("Path relative to the project folder"), content: str("Full file content") }, ["path", "content"]),
   tool("delete_file", "Delete a file from the project.", { path: str("Path relative to the project folder") }, ["path"]),
@@ -90,9 +90,14 @@ export function stopApp(dir: string): boolean {
   const app = apps.get(dir);
   if (!app) return false;
   try {
-    if (app.child.pid) process.kill(-app.child.pid, "SIGTERM");
+    if (app.child.pid && process.platform !== "win32") process.kill(-app.child.pid, "SIGTERM");
+    else app.child.kill("SIGTERM");
   } catch {
-    app.child.kill("SIGTERM");
+    try {
+      app.child.kill("SIGTERM");
+    } catch {
+      /* already gone */
+    }
   }
   apps.delete(dir);
   return true;
@@ -131,6 +136,23 @@ async function walk(root: string, dir: string, out: string[], limit = 500) {
   }
 }
 
+/** Most text one read_file returns (~12k tokens), so a few reads never overflow the model's context. */
+export const MAX_READ_CHARS = 48_000;
+
+/** Return whole lines starting at `from` (1-based) up to MAX_READ_CHARS, telling the model how to continue. */
+export function sliceLines(text: string, from = 1): string {
+  const lines = text.split("\n");
+  const start = Math.min(Math.max(1, Math.floor(from)), Math.max(1, lines.length));
+  let used = 0;
+  let end = start - 1;
+  while (end < lines.length && used + lines[end].length + 1 <= MAX_READ_CHARS) used += lines[end++].length + 1;
+  if (end === start - 1 && end < lines.length) end++; // a single very long line: return it anyway (cut)
+  const body = lines.slice(start - 1, end).join("\n").slice(0, MAX_READ_CHARS);
+  if (start === 1 && end >= lines.length) return body;
+  const more = end < lines.length ? ` Call read_file with from_line=${end + 1} for more, or use search_code.` : "";
+  return `[lines ${start}-${end} of ${lines.length}.${more}]\n${body}`;
+}
+
 // ---------- executor ----------
 
 type Args = Record<string, unknown>;
@@ -167,8 +189,8 @@ export async function runTool(name: string, a: Args, ctx: ToolContext): Promise<
       const abs = safePath(p.dir, arg(a, "path"));
       const s = await stat(abs).catch(() => null);
       if (!s?.isFile()) throw new Error(`No such file: ${a.path}`);
-      if (s.size > 400_000) throw new Error("File too large to read (over 400 KB)");
-      return await readFile(abs, "utf8");
+      if (s.size > 5_000_000) throw new Error("File too large to read (over 5 MB). Use search_code to find the part you need.");
+      return sliceLines(await readFile(abs, "utf8"), Number(a.from_line) || 1);
     }
     case "search_code": {
       const needle = arg(a, "text").toLowerCase();
@@ -242,6 +264,11 @@ export async function runTool(name: string, a: Args, ctx: ToolContext): Promise<
       child.stderr?.on("data", onData);
       child.on("exit", (code) => {
         app.output += `\n[exited with code ${code}]`;
+        if (apps.get(p.dir) === app) apps.delete(p.dir);
+      });
+      // Spawn failures (e.g. the folder was moved) arrive as an event; without a listener they'd crash the server.
+      child.on("error", (err) => {
+        app.output += `\n[could not start: ${err.message}]`;
         if (apps.get(p.dir) === app) apps.delete(p.dir);
       });
       await new Promise((r) => setTimeout(r, 3000));

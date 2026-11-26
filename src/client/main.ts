@@ -62,7 +62,18 @@ type ChatItem =
   | { kind: "reply"; text: string; changed?: string[] }
   | { kind: "activity"; text: string; ok: boolean }
   | { kind: "approval"; id: string; command: string; answer?: boolean };
-const chat: { items: ChatItem[]; busy: boolean; draft: string } = { items: [], busy: false, draft: "" };
+interface Chat {
+  items: ChatItem[];
+  busy: boolean;
+  draft: string;
+}
+/** One conversation per project, so a reply that arrives after switching projects lands in the right one. */
+const chats = new Map<string, Chat>();
+function chatFor(project: string): Chat {
+  let c = chats.get(project);
+  if (!c) chats.set(project, (c = { items: [], busy: false, draft: "" }));
+  return c;
+}
 
 /** Display name for a reference like "storage" or "storage/save-todos". */
 function ghostLabel(ref: string): string {
@@ -159,10 +170,11 @@ async function goHome() {
 
 function subscribe(name: string) {
   events?.close();
-  events = api.events(name, onServerEvent);
+  events = api.events(name, (ev) => onServerEvent(name, ev));
 }
 
-function onServerEvent(ev: ServerEvent) {
+function onServerEvent(project: string, ev: ServerEvent) {
+  if (project !== state.project) return;
   if (ev.type === "progress") {
     if (state.busy && ev.message !== "Done") $("status-text").textContent = ev.message;
     const log = $("gen-log");
@@ -175,6 +187,7 @@ function onServerEvent(ev: ServerEvent) {
     renderBanner();
   } else if (ev.type === "assistant") {
     const e = ev.event;
+    const chat = chatFor(project);
     if (e.kind === "tool") chat.items.push({ kind: "activity", text: e.summary, ok: true });
     else if (e.kind === "tool-result" && !e.ok) chat.items.push({ kind: "activity", text: e.summary, ok: false });
     else if (e.kind === "approval") {
@@ -194,11 +207,17 @@ async function openProject(name: string) {
   state.project = name;
   state.chart = data.chart;
   state.outside = data.outside;
-  chat.items = [];
-  api
-    .assistantTranscript(name)
-    .then((t) => (chat.items = t.map((m): ChatItem => (m.role === "user" ? { kind: "user", text: m.text } : { kind: "reply", text: m.text }))))
-    .catch(() => undefined);
+  const chat = chatFor(name);
+  if (!chat.busy) {
+    api
+      .assistantTranscript(name)
+      .then((t) => {
+        if (chat.busy) return; // a turn started meanwhile; keep its live items
+        chat.items = t.map((m): ChatItem => (m.role === "user" ? { kind: "user", text: m.text } : { kind: "reply", text: m.text }));
+        if (state.project === name && state.assistant) renderPanel();
+      })
+      .catch(() => undefined);
+  }
   subscribe(name);
   if (!data.chart.root.nodes.length) return startStackChoice(name, data.chart.idea);
   history.replaceState(null, "", `/?p=${encodeURIComponent(name)}`);
@@ -739,6 +758,7 @@ function openAssistant() {
 
 function assistantPanel() {
   const name = state.project!;
+  const chat = chatFor(name);
   const wrap = h("div", { class: "panel-body assistant" });
   wrap.append(
     h(
@@ -793,7 +813,7 @@ function assistantPanel() {
       .catch((e) => chat.items.push({ kind: "reply", text: `Error: ${(e as Error).message}` }))
       .finally(() => {
         chat.busy = false;
-        if (state.assistant) renderPanel();
+        if (state.project === name && state.assistant) renderPanel();
       });
   };
   ta.addEventListener("keydown", (e) => {
@@ -954,9 +974,12 @@ $("settings-form").addEventListener("submit", (e) => {
   const model = ($("set-model") as HTMLInputElement).value.trim();
   void guard(key ? "Checking the key…" : "Saving…", async () => {
     // Check a new key BEFORE saving it, so a typo never replaces a working key.
+    // Refuse only a key DeepSeek says is wrong (401); no balance or no network isn't the key's fault.
+    let note = "";
     if (key) {
       const t = await api.testKey(key);
-      if (!t.ok) return settingsResult(`Not saved: ${t.message}`, false);
+      if (t.invalid) return settingsResult(`Not saved: ${t.message}`, false);
+      if (!t.ok) note = t.message;
     }
     const patch: { deepseekApiKey?: string; deepseekModel?: string } = { deepseekModel: model };
     if (key) patch.deepseekApiKey = key;
@@ -964,7 +987,8 @@ $("settings-form").addEventListener("submit", (e) => {
     ($("set-key") as HTMLInputElement).value = "";
     renderSettings(s);
     await refreshInfo();
-    settingsResult(key ? "The key works and is saved." : "Saved.", true);
+    if (note) settingsResult(`Saved. Note: ${note}`, false);
+    else settingsResult(key ? "The key works and is saved." : "Saved.", true);
   });
 });
 $("set-done").addEventListener("click", () => beforeSettings?.());

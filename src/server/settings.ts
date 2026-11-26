@@ -90,17 +90,22 @@ export class SettingsStore {
   }
 
   /** Check a key (or the saved one) against DeepSeek. */
-  async test(apiKey?: string): Promise<{ ok: boolean; message: string }> {
+  /**
+   * Check a key (or the saved one) against DeepSeek. `invalid` is true only when DeepSeek says the key is wrong
+   * (401): that's the only case where saving it should be refused. No balance, outages and network trouble are not
+   * the key's fault.
+   */
+  async test(apiKey?: string): Promise<{ ok: boolean; invalid: boolean; message: string }> {
     const key = apiKey?.trim() || this.key()?.key;
-    if (!key) return { ok: false, message: NO_KEY_MESSAGE };
+    if (!key) return { ok: false, invalid: true, message: NO_KEY_MESSAGE };
     try {
       const res = await fetch(`${this.baseUrl()}/models`, { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) });
-      if (res.ok) return { ok: true, message: "Connected to DeepSeek. The key works." };
-      if (res.status === 401) return { ok: false, message: "DeepSeek rejected this key (401). Check it was copied completely." };
-      if (res.status === 402) return { ok: false, message: "The key works, but the DeepSeek account has no balance (402)." };
-      return { ok: false, message: `DeepSeek answered ${res.status}.` };
+      if (res.ok) return { ok: true, invalid: false, message: "Connected to DeepSeek. The key works." };
+      if (res.status === 401) return { ok: false, invalid: true, message: "DeepSeek rejected this key (401). Check it was copied completely." };
+      if (res.status === 402) return { ok: false, invalid: false, message: "The key works, but the DeepSeek account has no balance (402). Top up at platform.deepseek.com." };
+      return { ok: false, invalid: false, message: `DeepSeek answered ${res.status}, so the key couldn't be checked right now.` };
     } catch (e) {
-      return { ok: false, message: `Could not reach DeepSeek: ${(e as Error).message}` };
+      return { ok: false, invalid: false, message: `Could not reach DeepSeek to check the key (${(e as Error).message}).` };
     }
   }
 }
