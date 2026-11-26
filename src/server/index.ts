@@ -102,10 +102,7 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
         if (parts.length === 2 && method === "GET") return send(res, 200, brain.settings.status());
         if (parts.length === 2 && method === "PUT") {
           const b = await body(req);
-          const patch: { deepseekApiKey?: string; deepseekModel?: string } = {};
-          if (typeof b.deepseekApiKey === "string") patch.deepseekApiKey = b.deepseekApiKey;
-          if (typeof b.deepseekModel === "string") patch.deepseekModel = b.deepseekModel;
-          brain.update(patch);
+          brain.update(typeof b.deepseekApiKey === "string" ? { deepseekApiKey: b.deepseekApiKey } : {});
           return send(res, 200, { ...brain.settings.status(), ai: brain.label });
         }
         if (parts.length === 3 && parts[2] === "test" && method === "POST") {

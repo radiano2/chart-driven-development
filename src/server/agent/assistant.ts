@@ -17,7 +17,8 @@ const MAX_HISTORY_CHARS = 140_000;
 const MAX_TOOL_RESULT = 50_000;
 
 function size(m: ChatMessage): number {
-  return (m.content?.length ?? 0) + ("tool_calls" in m && m.tool_calls ? JSON.stringify(m.tool_calls).length : 0);
+  if (m.role !== "assistant") return m.content.length;
+  return (m.content?.length ?? 0) + (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0) + (m.reasoning_content?.length ?? 0);
 }
 
 export function loadSkill(): string {
@@ -129,7 +130,12 @@ ${modules}`;
           this.emit({ kind: "thinking" });
           this.compactHistory();
           const msg = await this.llm.chat([system, ...this.history], TOOL_DEFS);
-          this.history.push({ role: "assistant", content: msg.content, tool_calls: msg.tool_calls });
+          this.history.push({
+            role: "assistant",
+            content: msg.content,
+            tool_calls: msg.tool_calls,
+            ...(msg.reasoning_content ? { reasoning_content: msg.reasoning_content } : {}),
+          });
           if (!msg.tool_calls?.length) {
             reply = msg.content?.trim() || "(no reply)";
             break;

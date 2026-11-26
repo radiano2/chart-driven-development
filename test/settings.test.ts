@@ -38,8 +38,8 @@ describe("settings store", () => {
     const file = path.join(dir, "a", "settings.json");
     const s = new SettingsStore(file, { DEEPSEEK_API_KEY: "sk-from-env-9999" });
     assert.deepEqual([s.status().keySource, s.status().keyHint], ["env", "…9999"]);
-    s.save({ deepseekApiKey: "  sk-saved-key-5678 ", deepseekModel: "deepseek-reasoner" });
-    assert.deepEqual([s.status().keySource, s.status().keyHint, s.status().model], ["settings", "…5678", "deepseek-reasoner"]);
+    s.save({ deepseekApiKey: "  sk-saved-key-5678 " });
+    assert.deepEqual([s.status().keySource, s.status().keyHint, s.status().model], ["settings", "…5678", "deepseek-flash"]);
     if (process.platform !== "win32") assert.equal((await stat(file)).mode & 0o777, 0o600);
     // Reload from disk
     assert.equal(new SettingsStore(file, {}).key()?.key, "sk-saved-key-5678");
@@ -68,7 +68,7 @@ describe("settings store", () => {
     await assert.rejects(brain.ai.proposeStack("x"), /No DeepSeek API key yet/);
     await assert.rejects(brain.tools.chat([], []), /No DeepSeek API key yet/);
     brain.update({ deepseekApiKey: "sk-new-key-0000" });
-    assert.equal(brain.label, "DeepSeek (deepseek-chat)");
+    assert.equal(brain.label, "DeepSeek (deepseek-flash)");
   });
 });
 
@@ -93,7 +93,7 @@ describe("settings API", () => {
   it("saves a key, tests it, and never returns it", async () => {
     assert.equal((await (await fetch(`${base}/api/info`)).json()).needsKey, true);
     const saved = await (await json("PUT", "/api/settings", { deepseekApiKey: "sk-good-key-1234" })).json();
-    assert.deepEqual([saved.hasKey, saved.keyHint, saved.ai], [true, "…1234", "DeepSeek (deepseek-chat)"]);
+    assert.deepEqual([saved.hasKey, saved.keyHint, saved.ai], [true, "…1234", "DeepSeek (deepseek-flash)"]);
     const raw = await (await fetch(`${base}/api/settings`)).text();
     assert.doesNotMatch(raw, /sk-good-key/);
     assert.equal((await (await json("POST", "/api/settings/test", {})).json()).ok, true);

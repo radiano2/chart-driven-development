@@ -948,7 +948,7 @@ async function openSettings() {
 
 function renderSettings(s: import("./api.ts").SettingsStatus) {
   $("settings-file").textContent = s.file;
-  ($("set-model") as HTMLInputElement).value = s.model;
+  $("settings-model").textContent = s.model;
   const line = s.mock
     ? "The app is running in mock mode (CDD_AI=mock), so no key is used until you restart it normally."
     : s.keySource === "settings"
@@ -971,24 +971,19 @@ $("key-banner-btn").addEventListener("click", () => void openSettings());
 $("settings-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const key = ($("set-key") as HTMLInputElement).value.trim();
-  const model = ($("set-model") as HTMLInputElement).value.trim();
-  void guard(key ? "Checking the key…" : "Saving…", async () => {
+  if (!key) return settingsResult("Paste a key first.", false);
+  void guard("Checking the key…", async () => {
     // Check a new key BEFORE saving it, so a typo never replaces a working key.
     // Refuse only a key DeepSeek says is wrong (401); no balance or no network isn't the key's fault.
-    let note = "";
-    if (key) {
-      const t = await api.testKey(key);
-      if (t.invalid) return settingsResult(`Not saved: ${t.message}`, false);
-      if (!t.ok) note = t.message;
-    }
-    const patch: { deepseekApiKey?: string; deepseekModel?: string } = { deepseekModel: model };
-    if (key) patch.deepseekApiKey = key;
-    const s = await api.saveSettings(patch);
+    const t = await api.testKey(key);
+    if (t.invalid) return settingsResult(`Not saved: ${t.message}`, false);
+    const note = t.ok ? "" : t.message;
+    const s = await api.saveSettings({ deepseekApiKey: key });
     ($("set-key") as HTMLInputElement).value = "";
     renderSettings(s);
     await refreshInfo();
     if (note) settingsResult(`Saved. Note: ${note}`, false);
-    else settingsResult(key ? "The key works and is saved." : "Saved.", true);
+    else settingsResult("The key works and is saved.", true);
   });
 });
 $("set-done").addEventListener("click", () => beforeSettings?.());

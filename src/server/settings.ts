@@ -1,8 +1,8 @@
-// App settings (DeepSeek key + model) kept in a local file outside git, and the AI that follows them live.
+// App settings (the DeepSeek key) kept in a local file outside git, and the AI that follows them live.
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AI } from "./ai/ai.ts";
-import { DeepSeek, DeepSeekTools, type ToolLLM } from "./ai/deepseek.ts";
+import { DEEPSEEK_MODEL, DeepSeek, DeepSeekTools, type ToolLLM } from "./ai/deepseek.ts";
 import { LlmAI } from "./ai/llm.ts";
 import { MockAI } from "./ai/mock.ts";
 import { MockToolLLM } from "./agent/mock-llm.ts";
@@ -10,7 +10,6 @@ import { HttpError } from "./project.ts";
 
 export interface Settings {
   deepseekApiKey?: string;
-  deepseekModel?: string;
 }
 
 export interface SettingsStatus {
@@ -24,7 +23,6 @@ export interface SettingsStatus {
   file: string;
 }
 
-export const DEFAULT_MODEL = "deepseek-chat";
 export const NO_KEY_MESSAGE = "No DeepSeek API key yet. Open Settings (top right) and paste your key, or put DEEPSEEK_API_KEY in .env.";
 
 function hint(key: string) {
@@ -48,8 +46,9 @@ export class SettingsStore {
 
   /** Update settings. Empty string removes a value. */
   save(patch: Settings) {
-    const next: Settings = { ...this.data };
-    for (const k of ["deepseekApiKey", "deepseekModel"] as const) {
+    // Only the key is kept; anything else from older versions (e.g. a model name) is dropped.
+    const next: Settings = this.data.deepseekApiKey ? { deepseekApiKey: this.data.deepseekApiKey } : {};
+    for (const k of ["deepseekApiKey"] as const) {
       if (patch[k] === undefined) continue;
       const v = String(patch[k]).trim();
       if (v) next[k] = v;
@@ -77,7 +76,7 @@ export class SettingsStore {
   }
 
   model(): string {
-    return this.data.deepseekModel || this.env.DEEPSEEK_MODEL || DEFAULT_MODEL;
+    return DEEPSEEK_MODEL;
   }
 
   baseUrl(): string {
@@ -89,7 +88,6 @@ export class SettingsStore {
     return { mock: this.mock, hasKey: !!k, keySource: k?.source ?? null, keyHint: k ? hint(k.key) : null, model: this.model(), file: this.file };
   }
 
-  /** Check a key (or the saved one) against DeepSeek. */
   /**
    * Check a key (or the saved one) against DeepSeek. `invalid` is true only when DeepSeek says the key is wrong
    * (401): that's the only case where saving it should be refused. No balance, outages and network trouble are not
