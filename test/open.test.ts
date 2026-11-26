@@ -270,6 +270,25 @@ describe("drawing step by step", () => {
     w.closeAll();
   });
 
+  it("draws again a chart the app stopped in the middle of, unless files changed since", async () => {
+    const w = new Workspace(path.join(tmp, "ws-redraw"), new MockAI());
+    const dir = path.join(disk, "redraw", "notes");
+    await write(dir, CODE);
+    const r = await w.openFolder(dir, { wait: true });
+    await assert.rejects(w.redraw(r.name), /finished/);
+    // Pretend the app stopped mid-way: an unfinished chart on disk, no job running.
+    await writeFile(path.join(dir, ".chart/chart.json"), JSON.stringify({ ...r.chart, drawing: true }));
+    await writeFile(path.join(dir, "src/server.js"), "// edited\n");
+    await assert.rejects(w.redraw(r.name), /changed since the drawing stopped/);
+    gitIn(dir, "checkout", "--", "src/server.js");
+    await w.redraw(r.name);
+    const p = w.get(r.name);
+    assert.ok(p.drawing);
+    await p.drawing;
+    assert.equal((await p.loadChart()).drawing, undefined);
+    w.closeAll();
+  });
+
   it("puts the folder back and leaves the list when drawing fails", async () => {
     const ai = new GatedAI();
     ai.failModules = true;
@@ -417,7 +436,7 @@ describe("HTTP API", () => {
     assert.equal(proj.data.drawing, false);
     assert.ok(proj.data.chart.root.nodes.length > 0);
     assert.equal(proj.data.chart.drawing, undefined);
-    const again = await call("POST", "/api/projects/chess-engine/redraw", {});
+    const again = await call("POST", "/api/projects/chess-engine/redraw", {}); // finished: refused
     assert.equal(again.status, 400, "a finished chart isn't redrawn");
     const found = await call("POST", "/api/find", { description: "chess" });
     assert.equal(found.data.matches[0].name, "chess-engine");

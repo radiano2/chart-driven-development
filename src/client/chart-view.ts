@@ -207,6 +207,7 @@ export class ChartView {
   private animateChanges(chart: Chart, prev: NonNullable<ChartView["last"]>) {
     const STAGGER = 140;
     let fresh = 0;
+    let moved = false;
     for (const [id, grp] of this.nodeEls) {
       const was = prev.pos.get(id);
       const now = this.nodeBoxes.get(id)!;
@@ -215,6 +216,7 @@ export class ChartView {
         grp.style.setProperty("--delay", `${fresh++ * STAGGER}ms`);
       } else if (Math.abs(was.x - now.x) + Math.abs(was.y - now.y) > 1) {
         // Start where it was, then glide to where it is now.
+        moved = true;
         grp.style.transform = `translate(${was.x}px,${was.y}px)`;
         requestAnimationFrame(() =>
           requestAnimationFrame(() => {
@@ -232,7 +234,8 @@ export class ChartView {
     for (const [id, path] of this.edgePaths) {
       const grp = path.parentElement as unknown as SVGGElement;
       if (prev.edges.has(id)) {
-        grp.classList.add("reflow");
+        // Its route changed with the layout: fade it in rather than jump. Unchanged layouts don't flicker.
+        if (moved) grp.classList.add("reflow");
         continue;
       }
       grp.classList.add("appear");

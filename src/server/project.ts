@@ -864,6 +864,9 @@ export class Workspace {
     const p = this.get(name);
     if (!p.drawing) {
       if (!(await p.loadChart()).drawing) throw new HttpError(400, "This chart is finished. To change it, select a bubble and ask the AI.");
+      // Drawing commits the folder at the end; don't sweep edits made since then into that commit.
+      const changed = (await git.changedFiles(p.dir)).filter((f) => !f.startsWith(".chart/"));
+      if (changed.length) throw new HttpError(409, `${changed.length} file${changed.length === 1 ? " was" : "s were"} changed since the drawing stopped. Commit or stash ${changed.length === 1 ? "it" : "them"} first, then draw it again.`);
       this.jobs.set(name, this.draw(name, p));
     }
     return { ok: true };
