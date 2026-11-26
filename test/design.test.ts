@@ -221,5 +221,8 @@ describe("design flow", () => {
     await call("POST", `${P}/undo`);
     const after = await call<DesignState>("GET", `${P}/design`);
     assert.notDeepEqual(after, before);
+    // Screenshots stay out of git even after going back in history.
+    const open = await call<{ outside: string[] }>("GET", P);
+    assert.deepEqual(open.outside, []);
   });
 });

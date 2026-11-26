@@ -901,14 +901,13 @@ function designImg(stored: string, alt: string, version = "") {
 }
 
 function lightbox(src: string, alt: string) {
-  const close = () => overlay.remove();
+  const esc = (e: KeyboardEvent) => e.key === "Escape" && close();
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", esc);
+  };
   const overlay = h("div", { class: "lightbox", role: "dialog", "aria-label": alt, onclick: close }, h("img", { src, alt }), h("p", {}, alt, " · click anywhere to close"));
-  document.addEventListener("keydown", function esc(e) {
-    if (e.key === "Escape") {
-      close();
-      document.removeEventListener("keydown", esc);
-    }
-  });
+  document.addEventListener("keydown", esc);
   document.body.append(overlay);
 }
 

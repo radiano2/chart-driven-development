@@ -337,7 +337,7 @@ export async function runTool(name: string, a: Args, ctx: ToolContext): Promise<
       });
     }
     case "update_style": {
-      const style = await new Design(p).setStyleUnlocked(a.style, "Assistant: update the style guide");
+      const style = await new Design(p).setStyleUnlocked(a.style, "Assistant: update the style guide", false);
       ctx.changed.add(".chart/design/style.json");
       return `Saved the style guide: ${style.summary}`;
     }
@@ -350,7 +350,7 @@ export async function runTool(name: string, a: Args, ctx: ToolContext): Promise<
         bubbleIds: ids,
         style: normStyle(a.style),
         html: arg(a, "html"),
-      });
+      }, false);
       ctx.changed.add(m.image);
       return `Saved mockup "${m.title}" (id ${m.id}). Regions found for: ${Object.keys(m.crops).join(", ") || "none (add data-bubble attributes)"}. The user sees it in the Design panel.`;
     }

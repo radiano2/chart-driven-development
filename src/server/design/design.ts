@@ -75,12 +75,17 @@ export class Design {
     await writeFile(this.abs(rel), JSON.stringify(data, null, 2) + "\n");
   }
 
+  /**
+   * Screenshots are re-taken from the running app, so they stay out of git. The rule goes in .git/info/exclude,
+   * which isn't versioned, so an undo or restore can't remove it.
+   */
   private async ensureIgnore() {
-    const f = this.abs(".gitignore");
-    if (!existsSync(f)) {
-      await mkdir(path.dirname(f), { recursive: true });
-      await writeFile(f, "# Screenshots are re-taken from the running app; not versioned.\nscreens/\n");
-    }
+    const f = path.join(this.project.dir, ".git", "info", "exclude");
+    const rule = `/${DESIGN_DIR}/screens/`;
+    const current = existsSync(f) ? await readFile(f, "utf8") : "";
+    if (current.split("\n").includes(rule)) return;
+    await mkdir(path.dirname(f), { recursive: true });
+    await writeFile(f, `${current.replace(/\n?$/, "\n")}# Chart Driven Development: screenshots are re-taken, not versioned\n${rule}\n`);
   }
 
   async state(): Promise<DesignState> {
@@ -148,11 +153,11 @@ export class Design {
   // ---------- style + references ----------
 
   /** Replace the style guide (used by the assistant, which already holds the project lock). */
-  async setStyleUnlocked(raw: unknown, message = "Update the style guide"): Promise<StyleGuide> {
+  async setStyleUnlocked(raw: unknown, message = "Update the style guide", commit = true): Promise<StyleGuide> {
     const style = normStyle(raw);
     if (!style) throw new HttpError(400, "A style guide needs a summary or colors");
     await this.writeJson("style.json", style);
-    await this.changed(message);
+    await this.changed(message, commit);
     return style;
   }
 
@@ -203,8 +208,11 @@ export class Design {
     });
   }
 
-  /** Render and store a mockup (from the AI, the assistant or the mock), and save it as a version. */
-  async saveMockupUnlocked(d: { title: string; summary: string; request: string; bubbleIds: string[]; style: StyleGuide | null; html: string }): Promise<Mockup> {
+  /**
+   * Render and store a mockup (from the AI or the assistant). Saved as a version unless `commit` is false
+   * (the assistant saves everything from one turn as one version at the end).
+   */
+  async saveMockupUnlocked(d: { title: string; summary: string; request: string; bubbleIds: string[]; style: StyleGuide | null; html: string }, commit = true): Promise<Mockup> {
     const rendered = await renderHtml(d.html);
     const id = newId();
     const dir = `mockups/${id}`;
@@ -229,10 +237,13 @@ export class Design {
       created: now(),
     };
     let list = [m, ...(await this.state()).mockups];
-    for (const old of list.slice(MAX_MOCKUPS)) await rm(this.abs("mockups", old.id), { recursive: true, force: true });
+    for (const old of list.slice(MAX_MOCKUPS)) {
+      const safe = String(old.id).replace(/[^a-z0-9-]/g, "");
+      if (safe) await rm(this.abs("mockups", safe), { recursive: true, force: true });
+    }
     list = list.slice(0, MAX_MOCKUPS);
     await this.writeJson("mockups.json", list);
-    await this.changed(`Mockup: ${m.title}\n\n${m.summary}`);
+    await this.changed(`Mockup: ${m.title}\n\n${m.summary}`, commit);
     return m;
   }
 
@@ -254,13 +265,12 @@ export class Design {
       let s = await this.state();
       const m = id ? s.mockups.find((x) => x.id === id) : null;
       if (id && !m) throw new HttpError(404, "No such mockup");
-      if (m?.style) {
-        await this.writeJson("style.json", m.style);
-        s = await this.state();
-      }
+      // The mockup's style is what the code should follow; it's saved only once the AI's changes are in.
+      if (m?.style) s = { ...s, style: m.style };
       const html = m ? await readFile(path.join(this.project.dir, m.html), "utf8").catch(() => "") : "";
       this.project.progress(m ? `Applying "${m.title}" to the code…` : "Applying the style guide to the code…");
       const cs = await this.ai.applyDesign({ ...(await this.context(pc, s)), mockup: m ? { title: m.title, summary: m.summary, html } : null });
+      if (m?.style) await this.writeJson("style.json", m.style);
       const result = await this.project.applyChangeSet(pc, cs, m ? `Apply mockup: ${m.title}` : "Apply the style guide");
       this.project.emit({ type: "design", design: await this.state() });
       return result;
@@ -322,10 +332,16 @@ export class Design {
         this.project.progress(`Starting the app (${cmd})…`);
         startApp(this.project.dir, cmd);
       }
+      // Look again each time: the app may print its real address (e.g. another port) only once it's up.
       const end = Date.now() + 25_000;
-      while (Date.now() < end && !(base = await this.baseUrl(pc))) await new Promise((r) => setTimeout(r, 500));
+      let answered = false;
+      while (!answered && Date.now() < end) {
+        base = await this.baseUrl(pc);
+        answered = !!base && (await waitForUrl(base, 1000));
+        if (!answered) await new Promise((r) => setTimeout(r, 400));
+      }
       if (!base) throw new HttpError(400, "I don't know the app's address. Set it under Design → App address (e.g. http://localhost:3000).");
-      if (!(await waitForUrl(base, Math.max(2000, end - Date.now())))) {
+      if (!answered) {
         const out = (appOutput(this.project.dir) ?? "").slice(-600);
         throw new HttpError(502, `The app didn't answer at ${base}.${out ? ` Its output:\n${out}` : ""}`);
       }
