@@ -186,6 +186,28 @@ describe("a Chart Driven Development project copied from elsewhere", () => {
   });
 });
 
+describe("moved and damaged folders", () => {
+  it("a moved folder takes back its name when opened from its new place", async () => {
+    const a = path.join(disk, "moving", "before", "mover");
+    await write(a, { "main.py": "def run():\n    pass\n" });
+    assert.equal((await ws.openFolder(a)).name, "mover");
+    const b = path.join(disk, "moving", "after", "mover");
+    await mkdir(path.dirname(b), { recursive: true });
+    await (await import("node:fs/promises")).rename(a, b);
+    assert.equal((await ws.list()).find((p) => p.name === "mover")?.missing, true);
+    const r = await ws.openFolder(b);
+    assert.equal(r.name, "mover");
+    assert.equal(ws.get("mover").dir, b);
+    assert.equal((await ws.list()).filter((p) => p.name.startsWith("mover")).length, 1);
+  });
+
+  it("refuses a damaged chart file", async () => {
+    const dir = path.join(disk, "damaged");
+    await write(dir, { ".chart/chart.json": "{ not json", "a.js": "x" });
+    assert.match((await ws.inspect(dir)).blocked ?? "", /damaged/);
+  });
+});
+
 describe("find it for me", () => {
   before(async () => {
     await write(path.join(disk, "games", "space-shooter"), { "package.json": JSON.stringify({ description: "A canvas space shooter game" }), "main.js": "function loop() {}\n" });

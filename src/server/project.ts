@@ -628,6 +628,14 @@ export class Workspace {
       plan: [],
     };
     const block = (why: string) => ((result.blocked = why), result);
+    if (hasChart) {
+      try {
+        const pc = JSON.parse(readFileSync(path.join(dir, CHART_FILE), "utf8")) as ProjectChart;
+        if (!pc || typeof pc !== "object" || !pc.root || !Array.isArray(pc.root.nodes)) throw new Error();
+      } catch {
+        return block("Its .chart/chart.json is damaged, so it can't be opened. Restore it with git, or delete the .chart folder to draw the chart again from the code.");
+      }
+    }
 
     // Never a folder that holds the app itself or all projects: the home folder, a drive, the projects folder.
     const realRoot = realOrNull(this.root) ?? this.root;
@@ -695,8 +703,17 @@ export class Workspace {
       const p = this.get(info.name);
       return { name: p.name, chart: await p.loadChart() };
     }
+    // A remembered folder that isn't there any more and had this name was most likely moved here: let this one take its name.
+    const base = slug(path.basename(dir) || "project").slice(0, 60);
+    const moved = this.linked().findIndex((l) => l.name === base && !existsSync(path.join(l.dir, CHART_FILE)));
+    if (moved >= 0) {
+      this.linked().splice(moved, 1);
+      this.saveLinks();
+      this.open.get(base)?.close();
+      this.open.delete(base);
+    }
     // Pick the name again and hold it: another folder with the same name may be opening at the same time.
-    const name = this.freeName(path.basename(dir) || "project");
+    const name = this.freeName(base);
     this.reserved.add(name);
     try {
       return await this.link({ ...info, name });
