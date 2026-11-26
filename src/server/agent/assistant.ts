@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AssistantEvent } from "../../shared/types.ts";
 import type { ChatMessage, ToolLLM } from "../ai/deepseek.ts";
+import * as git from "../git.ts";
 import type { Project } from "../project.ts";
 import { runTool, TOOL_DEFS } from "./tools.ts";
 
@@ -35,6 +36,9 @@ function describeCall(name: string, a: Record<string, unknown>): string {
 export class Assistant {
   /** Conversation so far (without the system message). */
   history: ChatMessage[] = [];
+  /** What the user sees: their own words and the final replies. */
+  transcript: { role: "user" | "assistant"; text: string }[] = [];
+  private cancelled = false;
 
   constructor(private project: Project, private llm: ToolLLM, private opts: AssistantOptions) {}
 
@@ -63,20 +67,33 @@ ${modules}`;
     this.history = this.history.slice(start);
   }
 
-  /** Handle one user message. Holds the project lock for the whole turn. */
-  ask(text: string): Promise<{ reply: string; changed: string[] }> {
+  /**
+   * Handle one user message. `context` (e.g. the selected bubble) is shown to the model but not in the transcript.
+   * Holds the project lock for the whole turn, so everything that changes in the folder meanwhile is the turn's own
+   * doing and is saved as one commit at the end.
+   */
+  ask(text: string, context?: string): Promise<{ reply: string; changed: string[]; committed: boolean }> {
     return this.project.exclusive(async () => {
+      this.cancelled = false;
+      // Edits made outside the app before this turn get their own commit, so undoing the turn never undoes them.
+      await this.project.commit("Save outside edits before assistant turn");
       const ctx = {
         project: this.project,
-        approve: async (command: string) => this.opts.approve(command),
+        approve: async (command: string) => !this.cancelled && (await this.opts.approve(command)),
         changed: new Set<string>(),
         pendingMessage: `Assistant: ${short(text, 72)} (before undo)`,
       };
-      this.history.push({ role: "user", content: text });
+      this.history.push({ role: "user", content: context ? `${context}\n\n${text}` : text });
+      this.transcript.push({ role: "user", text });
       let reply = "";
       try {
         const system: ChatMessage = { role: "system", content: await this.systemPrompt() };
-        for (let step = 0; step < MAX_STEPS; step++) {
+        for (let step = 0; step < MAX_STEPS && !reply; step++) {
+          if (this.cancelled) {
+            reply = "Stopped.";
+            this.history.push({ role: "assistant", content: reply });
+            break;
+          }
           this.emit({ kind: "thinking" });
           const msg = await this.llm.chat([system, ...this.history], TOOL_DEFS);
           this.history.push({ role: "assistant", content: msg.content, tool_calls: msg.tool_calls });
@@ -86,11 +103,15 @@ ${modules}`;
           }
           if (msg.content?.trim()) this.emit({ kind: "note", text: msg.content.trim() });
           for (const call of msg.tool_calls) {
-            let args: Record<string, unknown> = {};
             let result: string;
             let ok = true;
+            if (this.cancelled) {
+              // Every tool call still needs an answer in the history.
+              this.history.push({ role: "tool", tool_call_id: call.id, content: "Cancelled by the user." });
+              continue;
+            }
             try {
-              args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+              const args: Record<string, unknown> = call.function.arguments ? JSON.parse(call.function.arguments) : {};
               this.emit({ kind: "tool", name: call.function.name, summary: describeCall(call.function.name, args) });
               result = await runTool(call.function.name, args, ctx);
             } catch (e) {
@@ -100,26 +121,34 @@ ${modules}`;
             this.emit({ kind: "tool-result", name: call.function.name, ok, summary: short(result) });
             this.history.push({ role: "tool", tool_call_id: call.id, content: result });
           }
-          if (step === MAX_STEPS - 1) reply = "I stopped after many steps without finishing. Tell me how you'd like to continue.";
+          if (step === MAX_STEPS - 1 && !reply) reply = "I stopped after many steps without finishing. Tell me how you'd like to continue.";
         }
       } catch (e) {
         reply = `Something went wrong talking to the AI: ${(e as Error).message}`;
         this.history.push({ role: "assistant", content: reply });
       }
-      {
-        const changed = [...ctx.changed];
-        if (changed.length) {
-          await this.project.commit(`Assistant: ${short(text, 72)}\n\n${short(reply, 600)}\n\nChanged: ${changed.join(", ")}`);
-          this.project.emit({ type: "chart", chart: await this.project.loadChart() });
-        }
-        this.trimHistory();
-        this.emit({ kind: "reply", text: reply, changed });
-        return { reply, changed };
-      }
+      // Commit whatever is dirty now: files written by tools AND by commands (npm install → lockfile, etc.).
+      const changed = (await git.changedFiles(this.project.dir));
+      const committed = changed.length
+        ? await this.project.commit(`Assistant: ${short(text, 72)}\n\n${short(reply, 600)}\n\nChanged: ${changed.join(", ")}`)
+        : false;
+      if (committed || ctx.changed.size) this.project.emit({ type: "chart", chart: await this.project.loadChart() });
+      this.transcript.push({ role: "assistant", text: reply });
+      if (this.transcript.length > 200) this.transcript = this.transcript.slice(-200);
+      this.trimHistory();
+      const result = { reply, changed: committed ? changed : [], committed };
+      this.emit({ kind: "reply", text: reply, changed: result.changed });
+      return result;
     });
+  }
+
+  /** Stop the running turn after the current step; pending approvals are denied by the caller. */
+  cancel() {
+    this.cancelled = true;
   }
 
   reset() {
     this.history = [];
+    this.transcript = [];
   }
 }

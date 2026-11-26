@@ -1,7 +1,7 @@
 // The assistant: a scripted model calls the real tools on a real generated project.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -9,6 +9,7 @@ import { after, before, describe, it } from "node:test";
 import type { ChatMessage, ToolCall, ToolDef, ToolLLM } from "../src/server/ai/deepseek.ts";
 import { MockAI } from "../src/server/ai/mock.ts";
 import { Assistant, loadSkill } from "../src/server/agent/assistant.ts";
+import { AssistantHub } from "../src/server/agent/hub.ts";
 import { isAllowed, TOOL_DEFS } from "../src/server/agent/tools.ts";
 import { Workspace, type Project } from "../src/server/project.ts";
 import type { AssistantEvent } from "../src/shared/types.ts";
@@ -98,7 +99,65 @@ describe("assistant", () => {
     assert.match(await readFile(path.join(project.dir, "tmp/evil.txt"), "utf8"), /x/);
     assert.match(results[2], /^Error: Reserved path/);
     assert.match(results[3], /^Error: Reserved path/);
-    assert.deepEqual(r.changed, ["/tmp/evil.txt"]);
+    assert.deepEqual(r.changed, ["tmp/evil.txt"]);
+  });
+
+  it("can't reach .git or .chart through ./, .., letter case or symlinks", async () => {
+    const sneaky = ["./.git/config", "docs/../.git/config", ".GIT/config", "x/../.chart/chart.json", "src/.git/hooks/pre-commit", ".git./config"];
+    const outside = await mkdtemp(path.join(tmpdir(), "cdd-outside-"));
+    await symlink(outside, path.join(project.dir, "link-out"));
+    await symlink(path.join(project.dir, ".git"), path.join(project.dir, "link-git"));
+    await symlink(path.join(outside, "nope.txt"), path.join(project.dir, "dangling.txt"));
+    const llm = new ScriptedLLM([
+      [
+        ...sneaky.map((p) => ({ name: "write_file", args: { path: p, content: "[core]\n\tfsmonitor = touch pwned\n" } })),
+        { name: "write_file", args: { path: "link-out/escaped.txt", content: "x" } },
+        { name: "read_file", args: { path: "link-git/config" } },
+        { name: "write_file", args: { path: "dangling.txt", content: "x" } },
+      ],
+    ]);
+    await new Assistant(project, llm, { approve: async () => false }).ask("sneak");
+    const results = toolResults(llm);
+    results.forEach((r, i) => assert.match(r, /^Error: (Reserved path|Path escapes project)/, `call ${i} should be refused: ${r}`));
+    assert.doesNotMatch(await readFile(path.join(project.dir, ".git/config"), "utf8"), /fsmonitor/);
+    await assert.rejects(readFile(path.join(outside, "escaped.txt")));
+    await assert.rejects(readFile(path.join(outside, "nope.txt")));
+    await rm(outside, { recursive: true, force: true });
+    for (const l of ["link-out", "link-git", "dangling.txt"]) await rm(path.join(project.dir, l), { force: true });
+    await project.commit("clean up symlinks");
+  });
+
+  it("commits files changed by commands too, and keeps earlier outside edits in their own commit", async () => {
+    await writeFile(path.join(project.dir, "outside.txt"), "edited in my editor");
+    const llm = new ScriptedLLM([[{ name: "run_command", args: { command: "echo lock > made-by-command.txt" } }]]);
+    const r = await new Assistant(project, llm, { approve: async () => true }).ask("make a file with a command");
+    assert.equal(r.committed, true);
+    assert.deepEqual(r.changed, ["made-by-command.txt"]);
+    const [latest, previous] = await project.history();
+    assert.match(latest.message, /^Assistant: make a file/);
+    assert.equal(previous.message, "Save outside edits before assistant turn");
+    assert.deepEqual(await project.checkOutside(true), []);
+  });
+
+  it("reports nothing saved when nothing changed", async () => {
+    const r = await new Assistant(project, new ScriptedLLM([[{ name: "list_files" }]]), { approve: async () => false }).ask("look around");
+    assert.deepEqual([r.committed, r.changed], [false, []]);
+  });
+
+  it("asks before starting the app", async () => {
+    const asked: string[] = [];
+    const llm = new ScriptedLLM([[{ name: "start_app" }]]);
+    await new Assistant(project, llm, { approve: async (c) => (asked.push(c), false) }).ask("start it");
+    assert.deepEqual(asked, ["npm start"]);
+    assert.match(toolResults(llm)[0], /did not allow starting/);
+  });
+
+  it("shows the model the selected bubble, but keeps it out of the transcript", async () => {
+    const llm = new ScriptedLLM([]);
+    const a = new Assistant(project, llm, { approve: async () => false });
+    await a.ask("rename it", '[Selected bubble: addTodo (id "add-todo") at level "todos"]');
+    assert.match(String(llm.seen[0].at(-1)!.content), /^\[Selected bubble: addTodo.*\n\nrename it$/s);
+    assert.deepEqual(a.transcript, [{ role: "user", text: "rename it" }, { role: "assistant", text: "Done." }]);
   });
 
   it("runs allowlisted commands directly and asks before anything else", async () => {
@@ -136,6 +195,25 @@ describe("assistant", () => {
     const r = await new Assistant(project, broken, { approve: async () => false }).ask("hello");
     assert.match(r.reply, /401 bad key/);
     assert.ok((await project.history()).length > 0);
+  });
+});
+
+describe("approvals in the web app", () => {
+  it("refuses at once when no browser tab is open, and cancel stops a waiting approval", async () => {
+    const hub = new AssistantHub(new ScriptedLLM([[{ name: "run_command", args: { command: "echo hi" } }]]));
+    const r = await hub.get(project).ask("run it");
+    assert.match(r.reply, /Done/);
+    const seen: string[] = [];
+    const listener = (e: { type: string; event?: { kind: string } }) => e.type === "assistant" && seen.push(e.event!.kind);
+    project.events.on("event", listener);
+    const hub2 = new AssistantHub(new ScriptedLLM([[{ name: "run_command", args: { command: "echo hi" } }]]));
+    const turn = hub2.get(project).ask("run it");
+    while (!seen.includes("approval")) await new Promise((r) => setTimeout(r, 10));
+    hub2.cancel(project);
+    const r2 = await turn;
+    assert.equal(r2.reply, "Stopped.");
+    assert.ok(seen.includes("approval-resolved"));
+    project.events.off("event", listener);
   });
 });
 

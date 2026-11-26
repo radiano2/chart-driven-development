@@ -1,6 +1,6 @@
 // A generated project: a normal folder on disk with real code, a git repo, and the chart in .chart/chart.json.
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { applyOps, filesOf, findBubble, getLevel, normBubble, normEdge, slug } from "../shared/chart.ts";
@@ -30,14 +30,54 @@ export class HttpError extends Error {
   }
 }
 
-/** Resolve a project-relative path, refusing anything that escapes the folder or touches .git / .chart. */
+/** Compare path segments the way a case-insensitive filesystem (macOS, Windows) would. */
+function fold(segment: string): string {
+  return segment.toLowerCase().replace(/[. ]+$/, "");
+}
+
+function realOrNull(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a project-relative path, refusing anything that escapes the folder (including through symlinks)
+ * or touches .git (at any depth) or .chart. Used for every file the app or the AI reads or writes.
+ */
 export function safePath(root: string, rel: string): string {
-  const clean = rel.replace(/\\/g, "/").replace(/^\/+/, "");
+  const escape = () => new HttpError(400, `Path escapes project: ${rel}`);
+  const clean = String(rel).replace(/\\/g, "/").replace(/^\/+/, "");
   const abs = path.resolve(root, clean);
-  if (abs !== root && !abs.startsWith(root + path.sep)) throw new HttpError(400, `Path escapes project: ${rel}`);
-  const first = clean.split("/")[0];
-  if (first === ".git" || first === ".chart") throw new HttpError(400, `Reserved path: ${rel}`);
+  const relative = path.relative(root, abs);
+  if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw escape();
+  const segs = relative.split(path.sep).filter(Boolean);
+  if (segs.some((s) => fold(s) === ".git") || (segs.length && fold(segs[0]) === ".chart")) {
+    throw new HttpError(400, `Reserved path: ${rel}`);
+  }
+  // Symlinks: the nearest existing ancestor (or the file itself) must really live inside the project.
+  const realRoot = realOrNull(root) ?? root;
+  let probe = abs;
+  while (probe !== root && !lstatOrNull(probe)) probe = path.dirname(probe);
+  const real = realOrNull(probe);
+  if (!real) throw escape(); // dangling symlink
+  if (real !== realRoot && !real.startsWith(realRoot + path.sep)) throw escape();
+  if (real !== probe && probe !== root) {
+    // Followed a symlink inside the project: re-check the reserved names on the real path.
+    const realSegs = path.relative(realRoot, real).split(path.sep).filter(Boolean);
+    if (realSegs.some((s) => fold(s) === ".git") || (realSegs.length && fold(realSegs[0]) === ".chart")) throw new HttpError(400, `Reserved path: ${rel}`);
+  }
   return abs;
+}
+
+function lstatOrNull(p: string) {
+  try {
+    return lstatSync(p);
+  } catch {
+    return null;
+  }
 }
 
 export class Project {
@@ -124,9 +164,11 @@ export class Project {
     }
   }
 
-  async commit(message: string) {
-    await git.commitAll(this.dir, message);
+  /** Stage and commit everything. Returns false when there was nothing to commit. */
+  async commit(message: string): Promise<boolean> {
+    const made = await git.commitAll(this.dir, message);
     this.lastOutside = "";
+    return made;
   }
 
   // ---------- creation ----------

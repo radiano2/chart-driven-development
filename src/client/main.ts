@@ -763,7 +763,7 @@ function assistantPanel() {
         h(
           "div",
           { class: "approval" },
-          h("p", {}, "The assistant wants to run a command that isn't on the safe list:"),
+          h("p", {}, "The assistant wants to run:"),
           h("code", {}, it.command),
           it.answer === undefined
             ? h("div", { class: "actions" }, h("button", { class: "primary", onclick: answer(true) }, "Allow once"), h("button", { onclick: answer(false) }, "Don't allow"))
@@ -782,14 +782,14 @@ function assistantPanel() {
   const send = () => {
     const text = ta.value.trim();
     if (!text || chat.busy) return;
-    const context = b ? `[Selected bubble: ${b.name} (id "${b.id}") at level "${state.level}"]\n` : state.level !== "root" ? `[Looking at module "${state.level}"]\n` : "";
+    const context = b ? `[Selected bubble: ${b.name} (id "${b.id}") at level "${state.level}"]` : state.level !== "root" ? `[Looking at module "${state.level}"]` : undefined;
     chat.items.push({ kind: "user", text });
     chat.draft = "";
     chat.busy = true;
     renderPanel();
     api
-      .assistant(name, context + text)
-      .then((r) => chat.items.push({ kind: "reply", text: r.reply, changed: r.changed }))
+      .assistant(name, text, context)
+      .then((r) => chat.items.push({ kind: "reply", text: r.reply, changed: r.committed ? r.changed : [] }))
       .catch((e) => chat.items.push({ kind: "reply", text: `Error: ${(e as Error).message}` }))
       .finally(() => {
         chat.busy = false;
@@ -811,7 +811,9 @@ function assistantPanel() {
       h(
         "div",
         { class: "actions" },
-        h("button", { class: "primary", onclick: send, disabled: chat.busy }, "Send"),
+        chat.busy
+          ? h("button", { onclick: () => void api.cancelAssistant(name).catch((e) => toast((e as Error).message, "error")) }, "Stop")
+          : h("button", { class: "primary", onclick: send }, "Send"),
         h(
           "button",
           {
@@ -950,18 +952,19 @@ $("settings-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const key = ($("set-key") as HTMLInputElement).value.trim();
   const model = ($("set-model") as HTMLInputElement).value.trim();
-  void guard("Saving…", async () => {
+  void guard(key ? "Checking the key…" : "Saving…", async () => {
+    // Check a new key BEFORE saving it, so a typo never replaces a working key.
+    if (key) {
+      const t = await api.testKey(key);
+      if (!t.ok) return settingsResult(`Not saved: ${t.message}`, false);
+    }
     const patch: { deepseekApiKey?: string; deepseekModel?: string } = { deepseekModel: model };
     if (key) patch.deepseekApiKey = key;
     const s = await api.saveSettings(patch);
     ($("set-key") as HTMLInputElement).value = "";
     renderSettings(s);
     await refreshInfo();
-    settingsResult(key ? "Saved. Checking the key…" : "Saved.", true);
-    if (key) {
-      const t = await api.testKey();
-      settingsResult(t.ok ? "Saved, and the key works." : `Saved, but: ${t.message}`, t.ok);
-    }
+    settingsResult(key ? "The key works and is saved." : "Saved.", true);
   });
 });
 $("set-done").addEventListener("click", () => beforeSettings?.());

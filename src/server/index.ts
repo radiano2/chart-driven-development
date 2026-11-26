@@ -48,7 +48,8 @@ function checkLocalRequest(req: http.IncomingMessage) {
     } catch {
       throw new HttpError(403, "Bad origin");
     }
-    if (!LOCAL_HOSTS.has(o.hostname === "::1" ? "[::1]" : o.hostname)) throw new HttpError(403, "Cross-site requests are not allowed");
+    // Same host AND port as this server: another app on localhost doesn't count as us.
+    if (o.host !== req.headers.host) throw new HttpError(403, "Cross-site requests are not allowed");
   }
   if (req.method !== "GET" && !String(req.headers["content-type"] ?? "").startsWith("application/json")) {
     throw new HttpError(415, "Send JSON (content-type: application/json)");
@@ -84,8 +85,13 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
   const label = () => (brain ? brain.label : (brainOrLabel as string));
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     try {
+      let parts: string[];
+      try {
+        parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      } catch {
+        throw new HttpError(400, "Malformed URL");
+      }
       if (parts[0] !== "api") return await serveStatic(url.pathname, res);
       checkLocalRequest(req);
       const method = req.method ?? "GET";
@@ -167,7 +173,10 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
           case "accept-outside":
             return send(res, 200, await p.acceptOutside());
           case "assistant":
-            return send(res, 200, await hub.get(p).ask(str(b.message, "message")));
+            return send(res, 200, await hub.get(p).ask(str(b.message, "message"), typeof b.context === "string" ? b.context.slice(0, 2000) : undefined));
+          case "assistant/cancel":
+            hub.cancel(p);
+            return send(res, 200, { ok: true });
           case "assistant/approve":
             if (!hub.resolve(p.name, str(b.id, "id"), b.allow === true)) throw new HttpError(404, "No such request (it may have timed out)");
             return send(res, 200, { ok: true });

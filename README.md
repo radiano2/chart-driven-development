@@ -45,12 +45,13 @@ It can:
 - read the chart and the code, list and search files
 - write or delete files and update the chart (kept in sync, per the guide)
 - list versions, undo, restore a version
-- run `npm install`, `npm test`, `npm run build` and similar safe commands directly
-- start / stop the generated app in the background and read its output
+- run a short allowlist of commands directly (`npm install`, `npm test`, `npm run build`, …)
+- start / stop the generated app in the background and read its output (starting always asks you)
 - open the project folder in your file manager
 
-It can't reach anything outside the project folder, and it can't edit `.git` or `.chart`.
-**Any command that isn't on the safe list asks you first** ("Allow once" / "Don't allow").
+It can't reach anything outside the project folder (paths are normalised and symlinks resolved first), and it can't touch `.git` (at any depth, any letter case) or `.chart`.
+**Any command that isn't on the allowlist asks you first** ("Allow once" / "Don't allow"). If no tab has the project open, or you press **Stop**, it is refused.
+Be aware the allowlist is not a sandbox: `npm install` / `npm test` / `npm run build` run the project's own scripts, which the assistant can edit. Each run is visible in the chat and every change can be undone.
 Everything one message changes is saved as one version, so a bad answer is one **Undo** away.
 
 The same assistant runs headless in a terminal, with no browser or server needed:
@@ -65,7 +66,7 @@ npm run cdd -- undo todo-app
 npm run cdd -- folder todo-app --open
 ```
 
-`npm link` installs it as a plain `cdd` command. In a terminal it asks before running commands that aren't on the safe list. When it's not interactive (scripts, background jobs) it refuses them.
+`npm link` installs it as a plain `cdd` command. In a terminal it asks before running commands that aren't on the allowlist. When it's not interactive (scripts, background jobs) it refuses them.
 Avoid running the CLI and the web app on the **same** project at the same moment; each saves its own versions.
 
 ## Where things live

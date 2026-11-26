@@ -11,7 +11,10 @@ import { safePath, type Project } from "../project.ts";
 const SKIP_DIRS = new Set([".git", "node_modules", ".chart", "dist", "build", "target", "__pycache__", ".venv", "venv"]);
 const MAX_OUTPUT = 8000;
 
-/** Commands that run without asking. Matched exactly after collapsing whitespace. */
+/**
+ * Commands that run without asking. Matched exactly after collapsing whitespace and run without a shell,
+ * so no one-liners or chaining. Note this is not a sandbox: install/test/build run the project's own scripts.
+ */
 export const ALLOWED_COMMANDS = [
   "npm install",
   "npm ci",
@@ -69,7 +72,7 @@ export const TOOL_DEFS: ToolDef[] = [
   tool("undo", "Go back to the version before the latest one (code and chart). Only when the user asks."),
   tool("restore_version", "Restore code and chart to a saved version. Only when the user asks.", { sha: str("Version id from list_versions") }, ["sha"]),
   tool("run_command", `Run a command in the project folder and return its output. These run directly: ${ALLOWED_COMMANDS.join(", ")}. Anything else asks the user first.`, { command: str("The command") }, ["command"]),
-  tool("start_app", "Start the project's app in the background with its run command, and return its first output."),
+  tool("start_app", "Start the project's app in the background with its run command (the user is asked first), and return its first output."),
   tool("app_output", "Latest output of the app started with start_app."),
   tool("stop_app", "Stop the app started with start_app."),
   tool("open_folder", "Open the project folder in the user's file manager."),
@@ -210,7 +213,7 @@ export async function runTool(name: string, a: Args, ctx: ToolContext): Promise<
       return h.map((e) => `${e.sha.slice(0, 7)}  ${e.date}  ${e.message.split("\n")[0]}`).join("\n");
     }
     case "undo": {
-      await p.undoUnlocked(ctx.changed.size ? ctx.pendingMessage : undefined);
+      await p.undoUnlocked(ctx.pendingMessage);
       ctx.changed.clear();
       return "Restored the previous version.";
     }
@@ -229,6 +232,8 @@ export async function runTool(name: string, a: Args, ctx: ToolContext): Promise<
       if (apps.has(p.dir)) return `Already running.\n${tail(apps.get(p.dir)!.output, 3000)}`;
       const pc = await p.loadChart();
       const cmd = pc.stack?.runCommand?.trim() || "npm start";
+      // Starting the app runs project code the assistant may have just written, so it always asks first.
+      if (!(await ctx.approve(cmd))) return "The user did not allow starting the app.";
       const child = spawn(process.platform === "win32" ? "cmd" : "sh", process.platform === "win32" ? ["/c", cmd] : ["-c", cmd], { cwd: p.dir, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
       const app = { child, output: "" };
       apps.set(p.dir, app);

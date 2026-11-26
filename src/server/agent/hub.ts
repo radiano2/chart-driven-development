@@ -4,7 +4,7 @@ import type { ToolLLM } from "../ai/deepseek.ts";
 import type { Project } from "../project.ts";
 import { Assistant } from "./assistant.ts";
 
-const APPROVAL_TIMEOUT_MS = 10 * 60_000;
+const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 
 export class AssistantHub {
   private assistants = new Map<string, Assistant>();
@@ -19,6 +19,8 @@ export class AssistantHub {
         onEvent: (event) => project.emit({ type: "assistant", event }),
         approve: (command) =>
           new Promise<boolean>((resolve) => {
+            // Nobody has the project open to answer: refuse instead of holding the project for minutes.
+            if (project.events.listenerCount("event") === 0) return resolve(false);
             const id = randomUUID();
             const timer = setTimeout(() => this.resolve(project.name, id, false), APPROVAL_TIMEOUT_MS);
             this.pending.set(id, {
@@ -33,8 +35,22 @@ export class AssistantHub {
           }),
       });
       this.assistants.set(project.name, a);
+      // When the last browser tab on this project goes away, refuse whatever it was asked to approve.
+      project.events.on("removeListener", (name: string) => {
+        if (name === "event" && project.events.listenerCount("event") === 0) this.denyAll(project.name);
+      });
     }
     return a;
+  }
+
+  /** Stop the running turn on a project and refuse its pending approvals. */
+  cancel(project: Project) {
+    this.assistants.get(project.name)?.cancel();
+    this.denyAll(project.name);
+  }
+
+  private denyAll(project: string) {
+    for (const [id, p] of this.pending) if (p.project === project) this.resolve(project, id, false);
   }
 
   /** Answer a pending approval. Returns false if there was none with that id for this project. */
@@ -46,12 +62,8 @@ export class AssistantHub {
     return true;
   }
 
-  /** Visible conversation: user messages and the assistant's final replies. */
+  /** Visible conversation: the user's own words and the assistant's final replies. */
   transcript(project: Project): { role: "user" | "assistant"; text: string }[] {
-    const a = this.assistants.get(project.name);
-    if (!a) return [];
-    return a.history
-      .filter((m) => m.role === "user" || (m.role === "assistant" && !m.tool_calls?.length && m.content))
-      .map((m) => ({ role: m.role as "user" | "assistant", text: String((m as { content: string }).content) }));
+    return this.assistants.get(project.name)?.transcript ?? [];
   }
 }

@@ -97,6 +97,12 @@ describe("settings API", () => {
   it("refuses calls from other websites and non-JSON posts", async () => {
     const cross = await json("PUT", "/api/settings", { deepseekApiKey: "sk-evil" }, { origin: "https://evil.example" });
     assert.equal(cross.status, 403);
+    // Another app on localhost (different port) is a different origin too.
+    const otherPort = await json("PUT", "/api/settings", { deepseekApiKey: "sk-evil" }, { origin: "http://localhost:5173" });
+    assert.equal(otherPort.status, 403);
+    const same = await json("GET", "/api/settings", undefined, { origin: base });
+    assert.equal(same.status, 200);
+    assert.equal((await fetch(`${base}/api/projects/%E0%A4%A`)).status, 400);
     const form = await fetch(`${base}/api/settings/test`, { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" });
     assert.equal(form.status, 415);
     // fetch() won't let us fake the Host header, so use a raw request (a DNS-rebinding page would send this).

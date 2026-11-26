@@ -18,7 +18,7 @@ const HELP = `Chart Driven Development, command line
   cdd restore <project> <version>    restore a saved version
   cdd folder <project> [--open]      print (or open) the project folder
   cdd settings                       show which DeepSeek key and model are used
-  cdd set-key                        save your DeepSeek API key (asks for it, so it stays out of shell history)
+  cdd set-key                        save your DeepSeek API key (typed hidden; checked before it's saved)
 
 Commands outside the safe list (install, test, build) ask before running.
 In a non-interactive shell they are refused.
@@ -46,13 +46,13 @@ async function main(argv: string[]) {
     return;
   }
   if (cmd === "set-key") {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-    const key = (await rl.question("DeepSeek API key: ")).trim();
-    rl.close();
+    const key = (await readSecret("DeepSeek API key (hidden): ")).trim();
     if (!key) throw new Error("No key entered");
+    // Check before saving, so a typo never replaces a working key.
+    const t = await cfg.brain.settings.test(key);
+    if (!t.ok) throw new Error(`Not saved: ${t.message}`);
     cfg.brain.update({ deepseekApiKey: key });
-    const t = await cfg.brain.settings.test();
-    out(t.ok ? "Saved. The key works." : `Saved, but: ${t.message}`);
+    out("The key works and is saved.");
     return;
   }
   if (cmd === "projects") {
@@ -140,10 +140,27 @@ async function converse(project: ReturnType<ReturnType<typeof setup>["ws"]["get"
   }
 }
 
+/** Read a line without echoing it (falls back to a plain read when stdin isn't a terminal). */
+async function readSecret(prompt: string): Promise<string> {
+  process.stderr.write(prompt);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr, terminal: process.stdin.isTTY === true });
+  // Swallow readline's echo of the typed characters.
+  (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = () => undefined;
+  try {
+    return await rl.question("");
+  } finally {
+    rl.close();
+    process.stderr.write("\n");
+  }
+}
+
+// Set the exit code instead of calling process.exit(), so piped output is fully flushed.
 main(process.argv.slice(2)).then(
-  () => process.exit(0),
+  () => {
+    process.exitCode = 0;
+  },
   (e) => {
     process.stderr.write(`cdd: ${(e as Error).message}\n`);
-    process.exit(1);
+    process.exitCode = 1;
   },
 );
