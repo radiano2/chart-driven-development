@@ -115,8 +115,8 @@ export class Project {
     this.events.emit("event", ev);
   }
 
-  progress(message: string) {
-    this.emit({ type: "progress", message });
+  progress(message: string, module?: string) {
+    this.emit(module ? { type: "progress", message, module } : { type: "progress", message });
   }
 
   /** Run project operations one at a time; file watching is paused while the app itself writes. */
@@ -286,7 +286,7 @@ export class Project {
 
       const mods = pc.root.nodes;
       for (const [i, m] of mods.entries()) {
-        this.progress(`Drawing ${m.name} (${i + 1} of ${mods.length})…`);
+        this.progress(`Drawing ${m.name} (${i + 1} of ${mods.length})…`, m.id);
         let own = (top.files[m.id] ?? []).map(cleanRel).filter((f) => known.has(f));
         if (!own.length && m.file) {
           const dir = path.posix.dirname(m.file);

@@ -2,6 +2,7 @@ import { getLevel } from "../shared/chart.ts";
 import type { Bubble, DesignState, FindResult, FolderInspection, FolderListing, Level, Mockup, Port, ProjectChart, ProjectSummary, Recommendation, RunChatMessage, RunTrace, ServerEvent, Stack } from "../shared/types.ts";
 import { api, type ChangeResult } from "./api.ts";
 import { ChartView } from "./chart-view.ts";
+import { allKeys, pendingSteps, revealKey, stepPause, visiblePart } from "./reveal.ts";
 
 // ---------- tiny DOM helper (always textContent, never innerHTML: AI output is untrusted) ----------
 
@@ -172,6 +173,10 @@ async function goHome() {
   events?.close();
   events = null;
   // Leaving a chart that's still being drawn: it keeps drawing, and opening the project again shows where it got to.
+  if (reveal) {
+    stopReveal();
+    setBusy(null);
+  }
   if (state.drawingChart) {
     state.drawingChart = false;
     setBusy(null);
@@ -284,18 +289,34 @@ function onServerEvent(project: string, ev: ServerEvent) {
   if (project !== state.project) return;
   if (ev.type === "progress") {
     if (state.busy && ev.message !== "Done") $("status-text").textContent = ev.message;
+    if (reveal && ev.module) {
+      reveal.aiModule = ev.module;
+      reveal.wake?.();
+    }
     const log = $("gen-log");
     if (!$("stack-page").hidden && ev.message !== "Done") log.append(h("li", {}, ev.message));
   } else if (ev.type === "chart") {
+    if (reveal) return feedReveal(ev.chart);
+    if (generating === project && $("workspace").hidden && ev.chart.root.nodes.length) {
+      // A new project's chart is ready (its code is still being written): draw it on the board now.
+      state.chart = ev.chart;
+      history.replaceState(null, "", `/?p=${encodeURIComponent(project)}`);
+      enterWorkspace(true);
+      startReveal(ev.chart, false);
+      return;
+    }
     state.chart = ev.chart;
     if (!$("workspace").hidden) renderChart(true, true);
   } else if (ev.type === "drawn") {
+    const extra = ev.warnings.length ? ` ${ev.warnings.length} note${ev.warnings.length === 1 ? "" : "s"}: ${ev.warnings.slice(0, 2).join(" ")}${ev.warnings.length > 2 ? " …" : ""}` : "";
+    const done = () => toast(`The chart is drawn. ${ev.summary} Double-click a module to open it.${extra}`, ev.warnings.length ? "error" : "info");
+    if (reveal) return finishReveal(ev.chart, () => (stopDrawingUi(), done()));
     state.chart = ev.chart;
     stopDrawingUi();
     if (!$("workspace").hidden) renderChart(true, true);
-    const extra = ev.warnings.length ? ` ${ev.warnings.length} note${ev.warnings.length === 1 ? "" : "s"}: ${ev.warnings.slice(0, 2).join(" ")}${ev.warnings.length > 2 ? " …" : ""}` : "";
-    toast(`The chart is drawn. ${ev.summary} Double-click a module to open it.${extra}`, ev.warnings.length ? "error" : "info");
+    done();
   } else if (ev.type === "draw-failed") {
+    stopReveal();
     stopDrawingUi();
     toast(`Couldn't draw the chart: ${ev.message} The half-drawn chart was removed and your code wasn't touched. Open the folder again to retry.`, "error");
     void goHome();
@@ -351,25 +372,26 @@ async function openProject(name: string) {
   if (!data.chart.root.nodes.length && !data.drawing && !data.chart.drawing) return startStackChoice(name, data.chart.idea);
   history.replaceState(null, "", `/?p=${encodeURIComponent(name)}`);
   state.drawingChart = data.drawing;
-  enterWorkspace();
-  if (data.drawing) startDrawingUi();
+  enterWorkspace(data.drawing);
+  if (data.drawing) startDrawingUi(true);
 }
 
-/** While the chart of an opened codebase is drawn: the board grows live, and editing waits until it's done. */
-function startDrawingUi() {
+/**
+ * While the chart of an opened codebase is drawn: the board grows live, and editing waits until it's done.
+ * `showExisting`: what was drawn before we got here (the project was opened mid-drawing) shows right away.
+ */
+function startDrawingUi(showExisting = false) {
   const name = state.project;
   state.drawingChart = true;
   setBusy("Reading the code…");
-  renderChart(true);
+  if (state.chart) startReveal(state.chart, showExisting);
   // Events only flow from when we subscribed: if the drawing ended just before that, catch up now.
   if (name)
     api
       .open(name)
       .then((d) => {
         if (state.project !== name || !state.drawingChart || d.drawing) return;
-        state.chart = d.chart;
-        stopDrawingUi();
-        renderChart(true, true);
+        finishReveal(d.chart, () => stopDrawingUi());
       })
       .catch(() => undefined);
 }
@@ -377,34 +399,250 @@ function startDrawingUi() {
 function stopDrawingUi() {
   if (!state.drawingChart) return;
   state.drawingChart = false;
-  setBusy(null);
+  if (!reveal) setBusy(null);
   renderBanner();
 }
 
-function enterWorkspace() {
+// ---------- drawing the chart live ----------
+
+/**
+ * The AI hands back many bubbles at once; the board shows them one by one, at a steady pace, so the chart looks
+ * like it's being drawn in front of you. Each module opens (with the usual zoom) while its functions are drawn,
+ * then the view goes back out to the modules and on to the next one. "Faster" and "Show all" are on the board.
+ */
+interface Reveal {
+  /** The whole chart so far, as the server sent it. */
+  target: ProjectChart;
+  /** What is on the board already (keys from reveal.ts). */
+  visible: Set<string>;
+  speed: number;
+  /** Open each module as it's drawn. Turned off when you go somewhere yourself. */
+  follow: boolean;
+  /** Show everything as soon as it arrives (the "Show all" button). */
+  instant: boolean;
+  /** The server has sent the finished chart: end once everything is on the board. */
+  done: (() => void) | null;
+  /** The module the AI is drawing right now, if we know it. */
+  aiModule: string | null;
+  /** Wakes the loop when new parts of the chart arrive. */
+  wake: (() => void) | null;
+}
+
+let reveal: Reveal | null = null;
+const SPEEDS = [1, 2, 4];
+/** How long a level takes to settle after a zoom (chart-view's "settle"); drawing on it sooner cuts that short. */
+const SETTLE_MS = 620;
+
+function startReveal(target: ProjectChart, showExisting: boolean) {
+  stopReveal();
+  const r: Reveal = { target, visible: showExisting ? allKeys(target) : new Set(), speed: 1, follow: true, instant: false, done: null, aiModule: null, wake: null };
+  reveal = r;
+  state.chart = visiblePart(target, r.visible);
+  if (!state.busy) setBusy("Drawing the chart…");
+  renderChart(true);
+  renderRevealBar();
+  void runReveal(r);
+}
+
+/** Leave the chart as it is and drop the queue (leaving the project, or the drawing failed). */
+function stopReveal() {
+  if (!reveal) return;
+  const r = reveal;
+  reveal = null;
+  r.wake?.();
+  renderRevealBar();
+}
+
+function feedReveal(pc: ProjectChart) {
+  if (!reveal) return;
+  reveal.target = pc;
+  reveal.wake?.();
+}
+
+/** The server is done: show the rest at the usual pace, then `then`. */
+function finishReveal(pc: ProjectChart, then: () => void) {
+  if (!reveal) {
+    state.chart = pc;
+    if (!$("workspace").hidden) renderChart(true, true);
+    return then();
+  }
+  reveal.target = pc;
+  reveal.done = then;
+  if (state.busy) $("status-text").textContent = "Drawing the chart…";
+  reveal.wake?.();
+}
+
+const sleep = (ms: number, alive: () => boolean) =>
+  new Promise<void>((res) => {
+    const end = Date.now() + ms;
+    const tick = () => (!alive() || Date.now() >= end ? res() : setTimeout(tick, Math.min(80, end - Date.now())));
+    tick();
+  });
+
+/** Move the view to `level` the way a person would: back out to the modules first, then into the next one. */
+async function followTo(r: Reveal, level: Level) {
+  const alive = () => reveal === r && r.follow;
+  if (state.level !== "root") {
+    await sleep(650 / r.speed, alive); // a moment to see the finished module
+    if (!alive()) return;
+    await openLevel("root", undefined, true);
+    await sleep(SETTLE_MS, alive);
+  }
+  if (level !== "root" && alive() && state.level !== level) {
+    await openLevel(level, undefined, true);
+    await sleep(SETTLE_MS, alive);
+  }
+}
+
+async function runReveal(r: Reveal) {
+  const alive = () => reveal === r;
+  while (alive()) {
+    const next = pendingSteps(r.target, r.visible);
+    if (r.instant && next.length) {
+      for (const s of next) r.visible.add(s.key);
+      showRevealed(r);
+      continue;
+    }
+    const step = next[0];
+    if (!step) {
+      if (r.done) break;
+      // Nothing to show yet: the AI is still working. Go and wait inside the module it's drawing.
+      const mod = r.aiModule;
+      if (r.follow && mod && mod !== state.level && r.visible.has(revealKey("root", "node", mod))) {
+        await followTo(r, mod);
+        continue;
+      }
+      await new Promise<void>((res) => (r.wake = res));
+      r.wake = null;
+      continue;
+    }
+    if (r.follow && step.level !== state.level) {
+      await followTo(r, step.level);
+      if (!alive()) return;
+      if (r.follow && step.level !== state.level) {
+        await sleep(120, alive); // a click got in the way; look again
+        continue;
+      }
+    }
+    r.visible.add(step.key);
+    showRevealed(r);
+    // Off-screen steps (you went elsewhere) still take their turn, but quickly.
+    await sleep((step.level === state.level ? stepPause(step) : 60) / r.speed, alive);
+  }
+  if (!alive()) return;
+  if (r.follow && state.level !== "root") {
+    await sleep(700 / r.speed, alive);
+    if (alive() && r.follow) {
+      await openLevel("root", undefined, true);
+      await sleep(SETTLE_MS, alive);
+    }
+  }
+  if (!alive()) return;
+  reveal = null;
+  state.chart = r.target;
+  if (!$("workspace").hidden) renderChart(true, true);
+  renderRevealBar();
+  setBusy(null);
+  r.done?.();
+}
+
+function showRevealed(r: Reveal) {
+  // During a zoom only the data changes: the level drawn when the zoom ends shows it.
+  state.chart = visiblePart(r.target, r.visible);
+  if (!$("workspace").hidden && !moving) renderChart(true, true);
+  renderRevealBar();
+}
+
+function renderRevealBar() {
+  const bar = $("reveal-bar");
+  const r = reveal;
+  bar.hidden = !r;
+  view.bottomInset = r ? 56 : 0;
+  if (!r) return bar.replaceChildren();
+  const total = allKeys(r.target).size;
+  const shown = total - pendingSteps(r.target, r.visible).length;
+  const waiting = !r.done && shown >= total;
+  const parts: Child[] = [
+    h("span", { class: "spinner" }),
+    h("span", { class: "reveal-text" }, !total ? "The AI is reading the code…" : waiting ? "The AI is still working…" : "Drawing the chart", total ? h("span", { class: "muted" }, ` ${shown} of ${total}${r.done ? "" : "+"}`) : null),
+    h("span", { class: "reveal-meter", "aria-hidden": "true" }, h("span", { style: `width:${total ? Math.round((shown / total) * 100) : 0}%` })),
+    !r.follow &&
+      h(
+        "button",
+        {
+          title: "Open each module again as it's drawn",
+          onclick: () => {
+            r.follow = true;
+            r.wake?.();
+            renderRevealBar();
+          },
+        },
+        "Follow along",
+      ),
+    !r.instant &&
+      h(
+        "button",
+        {
+          title: "Change the drawing speed",
+          onclick: () => {
+            r.speed = SPEEDS[(SPEEDS.indexOf(r.speed) + 1) % SPEEDS.length];
+            renderRevealBar();
+          },
+        },
+        `Speed ${r.speed}×`,
+      ),
+    !r.instant &&
+      h(
+        "button",
+        {
+          title: "Put everything on the board now",
+          onclick: () => {
+            r.instant = true;
+            r.follow = false;
+            r.wake?.();
+            renderRevealBar();
+          },
+        },
+        "Show all",
+      ),
+  ];
+  bar.replaceChildren(...parts.filter((p): p is Node => !!p));
+}
+
+/** `live`: the chart is about to be drawn step by step, so don't draw what's there yet. */
+function enterWorkspace(live = false) {
   state.level = "root";
   state.selected = null;
   resetPanelState();
   show("workspace");
-  renderChart();
+  if (!live) renderChart();
   renderBanner();
 }
 
 /** A level change in progress: ignore other clicks until its animation is done. */
 let moving = false;
 
-/** Go to a level, zooming into the module's bubble (or pulling back out of it) on the way. */
-async function openLevel(level: Level, focus?: string) {
+/**
+ * Go to a level, zooming into the module's bubble (or pulling back out of it) on the way. `auto`: the live drawing
+ * is moving the view; anything else is you, so the drawing stops following its modules.
+ */
+async function openLevel(level: Level, focus?: string, auto = false) {
+  if (!auto && reveal?.follow && !moving && level !== state.level) {
+    reveal.follow = false;
+    renderRevealBar();
+  }
   if (moving || !state.chart || level === state.level) {
     if (focus && level === state.level) select(focus);
     return;
   }
   const from = state.level;
+  const project = state.project;
   moving = true;
   try {
     view.stopRun();
     if (from === "root") await view.zoomInto(level);
     else await view.zoomAway();
+    if (state.project !== project || !state.chart) return; // left the project during the zoom
     state.level = level;
     state.selected = null;
     resetPanelState();
@@ -464,13 +702,14 @@ function currentBubble(): Bubble | undefined {
 function renderChart(keepView = false, animate = false, enter?: { how: "in" | "out"; from?: string }) {
   const chart = currentChart();
   if (!chart) {
+    if (!state.chart || state.level === "root") return;
     state.level = "root";
     return renderChart();
   }
   // While the chart is being drawn, keep the whole (growing) level in view.
-  view.render(chart, { keepView, animate, key: `${state.project}/${state.level}`, glide: animate && state.drawingChart, enter });
+  view.render(chart, { keepView, animate, key: `${state.project}/${state.level}`, glide: animate && (state.drawingChart || !!reveal), enter });
   const empty = $("empty-level");
-  if (state.drawingChart && !chart.nodes.length) {
+  if ((state.drawingChart || reveal) && !chart.nodes.length) {
     empty.replaceChildren(h("span", { class: "drawing-note" }, h("span", { class: "spinner" }), state.level === "root" ? "Reading your code. Modules appear here as they're found." : "This module's functions appear here as soon as they're drawn."));
   } else {
     empty.replaceChildren("This module is empty. Use ", h("b", {}, "＋ Bubble"), " to draw its first function.");
@@ -1032,16 +1271,32 @@ async function startStackChoice(name: string, idea: string) {
 async function generate(name: string, stack: Stack) {
   $("stack-title").textContent = `Building with ${stack.name}`;
   $("stack-options").replaceChildren();
-  const r = await guard("Drawing the chart…", () => api.generate(name, stack));
+  generating = name;
+  // As soon as the chart is designed it's drawn on the board (see onServerEvent), while the code is written.
+  const r = await guard("Drawing the chart…", () => api.generate(name, stack)).finally(() => (generating = null));
+  if (state.project !== name) return;
+  const done = () => toast("Your app is drawn and its code is written. Double-click a module to open it.");
   if (!r) {
-    $("stack-options").append(h("button", { onclick: () => void generate(name, stack) }, "Try again"));
-    return;
+    if ($("workspace").hidden) {
+      $("stack-options").append(h("button", { onclick: () => void generate(name, stack) }, "Try again"));
+      return;
+    }
+    // The chart was drawn but writing the code failed: keep what's there, the error is on screen.
+    if (reveal) reveal.instant = true;
+    return finishReveal(reveal?.target ?? state.chart!, () => undefined);
   }
-  state.chart = r.chart;
-  history.replaceState(null, "", `/?p=${encodeURIComponent(name)}`);
-  enterWorkspace();
-  toast("Your app is drawn and its code is written. Double-click a module to open it.");
+  if ($("workspace").hidden) {
+    state.chart = r.chart;
+    history.replaceState(null, "", `/?p=${encodeURIComponent(name)}`);
+    enterWorkspace(true);
+    startReveal(r.chart, false);
+  }
+  if (reveal) setBusy("Drawing the chart…"); // guard just cleared it; the board is still drawing
+  finishReveal(r.chart, done);
 }
+
+/** The new project whose chart and code are being made right now. */
+let generating: string | null = null;
 
 $("new-form").addEventListener("submit", (e) => {
   e.preventDefault();
