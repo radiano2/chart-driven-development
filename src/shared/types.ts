@@ -11,6 +11,14 @@ export type BubbleKind = "module" | "function";
 /** "draft" = drawn by hand, no code yet. "ready" = backed by real code. */
 export type BubbleStatus = "draft" | "ready";
 
+/** Marks a bubble that shows UI. Screenshots open `route` on the running app and capture `selector`. */
+export interface GuiInfo {
+  /** Path on the running app, e.g. "/" or "/settings". Default "/". */
+  route?: string;
+  /** CSS selector of the part this bubble draws. Default [data-bubble="<id>"], else the whole page. */
+  selector?: string;
+}
+
 export interface Bubble {
   id: string;
   name: string;
@@ -23,6 +31,8 @@ export interface Bubble {
   file?: string;
   /** Function / symbol name inside `file`, for function bubbles. */
   symbol?: string;
+  /** Set when this bubble shows UI: it gets screenshots and mockup crops. */
+  gui?: GuiInfo;
   /** Inner chart, for module bubbles. */
   children?: Chart;
 }
@@ -51,6 +61,8 @@ export interface Stack {
   runtime: string;
   libraries: string[];
   runCommand: string;
+  /** Where the running app can be opened, for web apps (e.g. http://localhost:3000). */
+  appUrl?: string;
   reasoning: string;
 }
 
@@ -127,6 +139,73 @@ export interface ProjectSummary {
   hasChart: boolean;
 }
 
+// ---------- design ----------
+
+export interface StyleColor {
+  name: string;
+  value: string;
+  use?: string;
+}
+
+/** The project's style guide: every mockup and UI change follows it. Stored in .chart/design/style.json. */
+export interface StyleGuide {
+  summary: string;
+  colors: StyleColor[];
+  fonts: { role: string; family: string }[];
+  /** Short tokens like "8px" or "rounded corners, 12px". */
+  radius: string;
+  spacing: string;
+  mood: string[];
+  /** Do / don't rules, one sentence each. */
+  rules: string[];
+}
+
+export interface DesignReference {
+  id: string;
+  /** Image path relative to the project, under .chart/design/references/. */
+  image: string;
+  note: string;
+  /** What the AI saw in the image (used in later prompts). */
+  description: string;
+  created: string;
+}
+
+export interface Mockup {
+  id: string;
+  title: string;
+  request: string;
+  summary: string;
+  /** Bubbles this mockup shows; each one with a region in the HTML gets a crop. */
+  bubbleIds: string[];
+  html: string;
+  image: string;
+  /** Bubble id → image path of that bubble's region (from data-bubble attributes). */
+  crops: Record<string, string>;
+  /** The style guide this mockup proposes; it becomes the project's when the mockup is applied. */
+  style: StyleGuide | null;
+  created: string;
+}
+
+export interface Screenshot {
+  bubbleId: string;
+  level: Level;
+  image: string;
+  url: string;
+  /** True when the bubble's own element was found; false = whole page. */
+  cropped: boolean;
+  takenAt: string;
+}
+
+export interface DesignState {
+  style: StyleGuide | null;
+  references: DesignReference[];
+  mockups: Mockup[];
+  /** Keyed by "<level>/<bubbleId>". */
+  screenshots: Record<string, Screenshot>;
+  /** Address of the running app, when set by hand. */
+  appUrl: string | null;
+}
+
 /** What the assistant is doing, streamed to the UI / CLI. */
 export type AssistantEvent =
   | { kind: "thinking" }
@@ -142,4 +221,5 @@ export type ServerEvent =
   | { type: "chart"; chart: ProjectChart }
   | { type: "outside-change"; files: string[] }
   | { type: "error"; message: string }
-  | { type: "assistant"; event: AssistantEvent };
+  | { type: "assistant"; event: AssistantEvent }
+  | { type: "design"; design: DesignState };

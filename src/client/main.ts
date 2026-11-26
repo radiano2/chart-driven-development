@@ -1,5 +1,5 @@
 import { getLevel } from "../shared/chart.ts";
-import type { Bubble, Level, Port, ProjectChart, Recommendation, RunTrace, ServerEvent, Stack } from "../shared/types.ts";
+import type { Bubble, DesignState, Level, Mockup, Port, ProjectChart, Recommendation, RunTrace, ServerEvent, Stack } from "../shared/types.ts";
 import { api, type ChangeResult } from "./api.ts";
 import { ChartView } from "./chart-view.ts";
 
@@ -37,6 +37,12 @@ interface State {
   history: boolean;
   assistant: boolean;
   outside: string[];
+  /** Design panel open. */
+  design: boolean;
+  designData: DesignState | null;
+  /** Unsent text in the design panel / a bubble's mockup box, kept across re-renders. */
+  designDraft: string;
+  refNote: string;
 }
 
 const state: State = {
@@ -53,6 +59,10 @@ const state: State = {
   history: false,
   assistant: false,
   outside: [],
+  design: false,
+  designData: null,
+  designDraft: "",
+  refNote: "",
 };
 
 let events: EventSource | null = null;
@@ -182,6 +192,9 @@ function onServerEvent(project: string, ev: ServerEvent) {
   } else if (ev.type === "chart") {
     state.chart = ev.chart;
     if (!$("workspace").hidden) renderChart(true);
+  } else if (ev.type === "design") {
+    state.designData = ev.design;
+    if (!$("workspace").hidden) renderPanel();
   } else if (ev.type === "outside-change") {
     state.outside = ev.files;
     renderBanner();
@@ -219,6 +232,15 @@ async function openProject(name: string) {
       .catch(() => undefined);
   }
   subscribe(name);
+  state.designData = null;
+  api
+    .design(name)
+    .then((d) => {
+      if (state.project !== name) return;
+      state.designData = d;
+      if (!$("workspace").hidden) renderPanel();
+    })
+    .catch(() => undefined);
   if (!data.chart.root.nodes.length) return startStackChoice(name, data.chart.idea);
   history.replaceState(null, "", `/?p=${encodeURIComponent(name)}`);
   enterWorkspace();
@@ -248,6 +270,7 @@ function resetPanelState() {
   state.run = null;
   state.history = false;
   state.assistant = false;
+  state.design = false;
   state.lastResult = null;
 }
 
@@ -328,6 +351,7 @@ function renderPanel() {
   if (!state.chart) return;
   if (state.run) return panel.append(runPanel(state.run));
   if (state.assistant) return panel.append(assistantPanel());
+  if (state.design) return panel.append(designPanel());
   if (state.history) {
     panel.append(historyPanel());
     return;
@@ -462,6 +486,7 @@ function bubblePanel(b: Bubble) {
   }
 
   if (state.lastResult?.bubbleId === b.id) wrap.append(resultBox());
+  wrap.append(screenSection(b));
   wrap.append(askBox(b));
   return wrap;
 }
@@ -752,6 +777,7 @@ function openAssistant() {
   state.run = null;
   state.drawing = false;
   state.history = false;
+  state.design = false;
   state.assistant = true;
   renderPanel();
 }
@@ -857,6 +883,340 @@ function assistantPanel() {
   return wrap;
 }
 
+// ---------- design: style guide, references, mockups, screenshots ----------
+
+function openDesign() {
+  view.stopRun();
+  state.run = null;
+  state.drawing = false;
+  state.history = false;
+  state.assistant = false;
+  state.design = true;
+  renderPanel();
+}
+
+function designImg(stored: string, alt: string, version = "") {
+  const src = api.designImage(state.project!, stored, version);
+  return h("img", { src, alt, loading: "lazy", class: "shot", title: "Click to enlarge", onclick: () => lightbox(src, alt) });
+}
+
+function lightbox(src: string, alt: string) {
+  const close = () => overlay.remove();
+  const overlay = h("div", { class: "lightbox", role: "dialog", "aria-label": alt, onclick: close }, h("img", { src, alt }), h("p", {}, alt, " · click anywhere to close"));
+  document.addEventListener("keydown", function esc(e) {
+    if (e.key === "Escape") {
+      close();
+      document.removeEventListener("keydown", esc);
+    }
+  });
+  document.body.append(overlay);
+}
+
+/** Mockups that show this bubble, newest first. */
+function mockupsFor(id: string): Mockup[] {
+  return (state.designData?.mockups ?? []).filter((m) => m.bubbleIds.includes(id) || m.crops[id]);
+}
+
+/** On a bubble: its real screenshot, its part of recent mockups, and a mockup request box. */
+function screenSection(b: Bubble) {
+  const name = state.project!;
+  const box = h("div", { class: "screen" });
+  if (!b.gui) {
+    box.append(
+      h("h4", {}, "Screen"),
+      h("p", { class: "small muted" }, "This bubble isn't marked as showing UI."),
+      h("button", { class: "link", onclick: () => void guard("Saving…", async () => applyResult(await api.setGui(name, state.level, b.id, {}), b.id)) }, "It shows UI: add screenshots"),
+    );
+    return box;
+  }
+  const shot = state.designData?.screenshots[`${state.level}/${b.id}`];
+  box.append(h("h4", {}, "Screen"));
+  if (shot) {
+    box.append(
+      designImg(shot.image, `${b.name}, running app`, shot.takenAt),
+      h("p", { class: "small muted" }, `From the running app, ${new Date(shot.takenAt).toLocaleString()}${shot.cropped ? "" : " (whole page: its element wasn't found)"}`),
+    );
+  } else box.append(h("p", { class: "small muted" }, "No screenshot yet."));
+  const run = state.chart?.stack?.runCommand || "npm start";
+  box.append(
+    h(
+      "div",
+      { class: "actions" },
+      h(
+        "button",
+        {
+          title: `Starts your app with "${run}" if it isn't running, then captures this part`,
+          onclick: () =>
+            void guard(`Taking a screenshot of ${b.name}…`, async () => {
+              await api.screenshot(name, state.level, b.id);
+              state.designData = await api.design(name);
+              renderPanel();
+            }),
+        },
+        shot ? "Retake screenshot" : "Take screenshot",
+      ),
+      h("button", { class: "link", onclick: () => openDesign() }, "Design…"),
+    ),
+    h("p", { class: "small muted" }, `Starts the app (${run}) if it isn't running.`),
+  );
+  const ms = mockupsFor(b.id).slice(0, 3);
+  for (const m of ms) {
+    box.append(
+      h("div", { class: "mock-crop" }, designImg(m.crops[b.id] ?? m.image, `${b.name} in mockup "${m.title}"`, m.created), h("p", { class: "small" }, h("strong", {}, "Mockup: "), m.title)),
+    );
+  }
+  const ta = h("textarea", { rows: 2, placeholder: `Ask for a mockup of ${b.name}, e.g. "make it calmer, bigger tap targets"` }) as HTMLTextAreaElement;
+  ta.value = state.designDraft;
+  ta.addEventListener("input", () => (state.designDraft = ta.value));
+  box.append(
+    ta,
+    h("div", { class: "actions" }, h("button", { class: "primary ai", onclick: () => requestMockup(ta.value, [b.id]) }, "Make a mockup")),
+    h(
+      "details",
+      { class: "gui-edit" },
+      h("summary", { class: "small muted" }, "Where it shows"),
+      guiForm(b),
+    ),
+  );
+  return box;
+}
+
+function guiForm(b: Bubble) {
+  const name = state.project!;
+  const route = h("input", { value: b.gui?.route ?? "/", placeholder: "/" }) as HTMLInputElement;
+  const selector = h("input", { value: b.gui?.selector ?? "", placeholder: `[data-bubble="${b.id}"]` }) as HTMLInputElement;
+  const form = h(
+    "form",
+    { class: "stack-form" },
+    h("label", {}, "Page path", route),
+    h("label", {}, "Element (CSS selector)", selector),
+    h(
+      "div",
+      { class: "actions" },
+      h("button", { type: "submit" }, "Save"),
+      h("button", { type: "button", class: "danger-link", onclick: () => void guard("Saving…", async () => applyResult(await api.setGui(name, state.level, b.id, null), b.id)) }, "Not UI"),
+    ),
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void guard("Saving…", async () => applyResult(await api.setGui(name, state.level, b.id, { route: route.value, selector: selector.value }), b.id));
+  });
+  return form;
+}
+
+function requestMockup(text: string, bubbleIds: string[]) {
+  const name = state.project!;
+  const request = text.trim();
+  if (!request) return toast("Describe the design you want first.");
+  void guard("Drawing a mockup…", async () => {
+    const m = await api.mockup(name, request, bubbleIds);
+    state.designDraft = "";
+    state.designData = await api.design(name);
+    renderPanel();
+    toast(`Mockup ready: ${m.title}`);
+  });
+}
+
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error("Couldn't read that file"));
+    r.readAsDataURL(file);
+  });
+}
+
+function uploadReference(file: File | undefined | null) {
+  const name = state.project!;
+  if (!file) return;
+  if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) return toast("Use a PNG, JPEG, WebP or GIF image.", "error");
+  if (file.size > 8 * 1024 * 1024) return toast("Images can be up to 8 MB.", "error");
+  void guard("Looking at the reference image…", async () => {
+    const r = await api.addReference(name, await readAsDataUrl(file), state.refNote);
+    state.refNote = "";
+    state.designData = r.design;
+    renderPanel();
+    toast("Reference added. The style guide was updated from it.");
+  });
+}
+
+function styleBox(d: DesignState) {
+  const name = state.project!;
+  const s = d.style;
+  const box = h("div", { class: "style-guide" }, h("h3", {}, "Style guide"));
+  if (!s) {
+    box.append(h("p", { class: "small muted" }, "No style yet. Add a reference image or ask for a mockup of a new look, and the AI writes one."));
+    return box;
+  }
+  box.append(h("p", {}, s.summary));
+  box.append(
+    h(
+      "div",
+      { class: "swatches" },
+      ...s.colors.map((c) => {
+        const chip = h("span", { class: "chip" });
+        chip.style.background = c.value;
+        return h("div", { class: "swatch", title: c.use ?? c.name }, chip, h("span", { class: "small" }, c.name), h("code", {}, c.value));
+      }),
+    ),
+  );
+  if (s.fonts.length) box.append(h("p", { class: "small" }, ...s.fonts.flatMap((f, i) => [i ? " · " : "", h("strong", {}, f.role), ` ${f.family}`])));
+  const meta = [s.radius && `corners ${s.radius}`, s.spacing, s.mood.join(", ")].filter(Boolean).join(" · ");
+  if (meta) box.append(h("p", { class: "small muted" }, meta));
+  if (s.rules.length) box.append(h("ul", { class: "rules small" }, ...s.rules.map((r) => h("li", {}, r))));
+  box.append(
+    h("button", { title: "Ask the AI to restyle the app's code to match this style guide", onclick: () => void guard("Applying the style guide to the code…", async () => applyResult(await api.applyDesign(name, null), null)) }, "Apply style to the code"),
+  );
+  return box;
+}
+
+function designPanel() {
+  const name = state.project!;
+  const d = state.designData ?? { style: null, references: [], mockups: [], screenshots: {}, appUrl: null };
+  const b = currentBubble();
+  const wrap = h("div", { class: "panel-body design" });
+  wrap.append(
+    h(
+      "div",
+      { class: "assistant-head" },
+      h("div", {}, h("p", { class: "eyebrow" }, "Design"), h("h2", {}, "How the app looks")),
+      h("button", { onclick: () => ((state.design = false), renderPanel()) }, "Close"),
+    ),
+    styleBox(d),
+  );
+
+  // Ask for a mockup
+  const ta = h("textarea", { rows: 3, placeholder: 'e.g. "a dark theme with a teal accent" or "a denser list for power users"' }) as HTMLTextAreaElement;
+  ta.value = state.designDraft;
+  ta.addEventListener("input", () => (state.designDraft = ta.value));
+  const focus = b?.gui ? (h("input", { type: "checkbox", checked: true }) as HTMLInputElement) : null;
+  wrap.append(
+    h(
+      "div",
+      { class: "ask" },
+      h("h3", {}, "Ask for a mockup"),
+      ta,
+      focus ? h("label", { class: "small check" }, focus, ` Focus on ${b!.name}`) : null,
+      h("button", { class: "primary ai", onclick: () => requestMockup(ta.value, focus?.checked && b ? [b.id] : []) }, "Make a mockup"),
+    ),
+  );
+
+  // Mockups
+  const mocks = h("div", { class: "mockups" }, h("h3", {}, `Mockups${d.mockups.length ? ` (${d.mockups.length})` : ""}`));
+  if (!d.mockups.length) mocks.append(h("p", { class: "small muted" }, "None yet."));
+  for (const m of d.mockups) {
+    mocks.append(
+      h(
+        "div",
+        { class: "mockup card" },
+        designImg(m.image, m.title, m.created),
+        h("p", {}, h("strong", {}, m.title)),
+        m.summary ? h("p", { class: "small" }, m.summary) : null,
+        m.style ? h("p", { class: "small muted" }, "Proposes a new style guide.") : null,
+        h(
+          "div",
+          { class: "actions" },
+          h(
+            "button",
+            {
+              class: "primary",
+              title: m.style ? "Makes its style the project's style guide and restyles the code" : "Restyles the code to match",
+              onclick: () => void guard(`Applying "${m.title}"…`, async () => applyResult(await api.applyDesign(name, m.id), null)),
+            },
+            "Apply to the code",
+          ),
+          h(
+            "button",
+            {
+              class: "danger-link",
+              onclick: () => {
+                if (!confirm(`Delete the mockup "${m.title}"? You can undo this.`)) return;
+                void guard("Deleting…", async () => {
+                  state.designData = await api.removeMockup(name, m.id);
+                  renderPanel();
+                });
+              },
+            },
+            "Delete",
+          ),
+        ),
+      ),
+    );
+  }
+  wrap.append(mocks);
+
+  // References
+  const file = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp,image/gif", hidden: true }) as HTMLInputElement;
+  file.addEventListener("change", () => uploadReference(file.files?.[0]));
+  const note = h("input", { placeholder: 'What you like about it (optional), e.g. "the colors"' }) as HTMLInputElement;
+  note.value = state.refNote;
+  note.addEventListener("input", () => (state.refNote = note.value));
+  const drop = h(
+    "div",
+    { class: "dropzone", tabindex: 0, role: "button", onclick: () => file.click(), onkeydown: (e: KeyboardEvent) => (e.key === "Enter" || e.key === " ") && file.click() },
+    "Drop an image here, paste one, or click to choose",
+  );
+  drop.addEventListener("dragover", (e) => (e.preventDefault(), drop.classList.add("over")));
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("over");
+    uploadReference(e.dataTransfer?.files[0]);
+  });
+  const refs = h("div", { class: "references" }, h("h3", {}, "Reference images"), h("p", { class: "small muted" }, "Show the AI a look you like. It reads the image and updates the style guide."), note, drop, file);
+  for (const r of d.references) {
+    refs.append(
+      h(
+        "div",
+        { class: "reference" },
+        designImg(r.image, r.note || "Reference image", r.created),
+        h(
+          "div",
+          {},
+          r.note ? h("p", { class: "small" }, h("strong", {}, r.note)) : null,
+          h("p", { class: "small muted" }, r.description),
+          h(
+            "button",
+            { class: "danger-link", onclick: () => void guard("Removing…", async () => ((state.designData = await api.removeReference(name, r.id)), renderPanel())) },
+            "Remove",
+          ),
+        ),
+      ),
+    );
+  }
+  wrap.append(refs);
+
+  // App address
+  const url = h("input", { value: d.appUrl ?? "", placeholder: state.chart?.stack?.appUrl ?? "http://localhost:3000" }) as HTMLInputElement;
+  const urlForm = h(
+    "form",
+    { class: "app-url" },
+    h("h3", {}, "App address for screenshots"),
+    h("p", { class: "small muted" }, "Leave empty to use the address the app prints when it starts."),
+    h("div", { class: "row" }, url, h("button", { type: "submit" }, "Save")),
+  );
+  urlForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void guard("Saving…", async () => {
+      state.designData = await api.setAppUrl(name, url.value);
+      renderPanel();
+      toast("Saved.");
+    });
+  });
+  wrap.append(urlForm);
+  return wrap;
+}
+
+// Paste an image anywhere while the design panel is open → reference.
+document.addEventListener("paste", (e) => {
+  if (!state.design || !state.project) return;
+  const item = [...(e.clipboardData?.items ?? [])].find((i) => i.type.startsWith("image/"));
+  if (item) {
+    e.preventDefault();
+    uploadReference(item.getAsFile());
+  }
+});
+
 // ---------- toolbar ----------
 
 $("home-link").addEventListener("click", () => void goHome());
@@ -866,6 +1226,7 @@ $("btn-draw").addEventListener("click", () => {
   state.run = null;
   state.history = false;
   state.assistant = false;
+  state.design = false;
   state.drawing = true;
   renderPanel();
   ($("panel").querySelector("input") as HTMLInputElement | null)?.focus();
@@ -892,6 +1253,7 @@ $("btn-undo").addEventListener("click", () => {
   });
 });
 $("btn-assistant").addEventListener("click", () => (state.assistant ? ((state.assistant = false), renderPanel()) : openAssistant()));
+$("btn-design").addEventListener("click", () => (state.design ? ((state.design = false), renderPanel()) : openDesign()));
 $("btn-folder").addEventListener("click", () => {
   const name = state.project;
   if (name) api.openFolder(name).then((r) => toast(r.message), (e) => toast((e as Error).message, "error"));
@@ -901,6 +1263,7 @@ $("btn-history").addEventListener("click", () => {
   state.run = null;
   state.drawing = false;
   state.assistant = false;
+  state.design = false;
   state.history = !state.history;
   renderPanel();
 });

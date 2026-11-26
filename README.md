@@ -70,6 +70,21 @@ npm run cdd -- folder todo-app --open
 `npm link` installs it as a plain `cdd` command. In a terminal it asks before running commands that aren't on the allowlist. When it's not interactive (scripts, background jobs) it refuses them.
 Avoid running the CLI and the web app on the **same** project at the same moment; each saves its own versions.
 
+## Design: style guide, mockups, screenshots
+
+The **Design** button opens the project's look:
+
+- **Style guide**: colors, fonts, corners, spacing and a few rules. Every mockup and UI change follows it.
+- **Reference images**: drop, paste or pick an image of a look you like (PNG, JPEG, WebP or GIF, up to 8 MB), with an optional note such as "the colors". DeepSeek (`deepseek-flash`, which reads images) describes it and updates the style guide.
+- **Mockups**: describe a design ("a dark theme with a teal accent"). The AI writes it as one HTML page, which the app draws to a PNG with a headless browser. JavaScript and the network are off while it's drawn. **Apply to the code** restyles the app to match, and a mockup's new style becomes the project's style guide. Saved as a version, so it can be undone.
+- **Screenshots on UI bubbles**: bubbles that draw UI say **UI** on the chart. Click one to see its part of the running app (**Take screenshot** starts the app with its run command if it isn't running) and its part of recent mockups. Mark any bubble as UI, and set the page path and CSS selector, under **Where it shows**.
+
+DeepSeek can't draw images, so mockups are HTML that the app renders. That keeps them true to real fonts and layout, and they can turn straight into code.
+Drawing needs Chrome or Edge on the computer (or set `CDD_CHROME` to a Chrome/Chromium executable, or run `npx playwright install chromium`).
+How the AI should design (formats, mockup rules, answer layout) is in [`skills/cdd-design.md`](skills/cdd-design.md). The assistant follows it too, and has `get_design`, `update_style`, `create_mockup` and `take_screenshot` tools.
+
+Design files live in the project under `.chart/design/` and are versioned with the code, except screenshots, which are re-taken from the running app.
+
 ## Where things live
 
 - Generated projects: `./projects/<name>/` (change with `CDD_WORKSPACE`). Each one is a normal folder with its own git repo.
@@ -83,11 +98,12 @@ src/shared/      types + chart helpers used by server and browser
 src/server/      local HTTP API, project/git/watch logic
 src/server/ai/   AI interface, DeepSeek client + prompts (llm.ts), offline mock (mock.ts)
 src/server/agent/ assistant loop, tools + safety rules, web approvals (hub.ts)
+src/server/design/ style guide, references, mockups (render.ts draws HTML to PNG), screenshots
 src/cli/         the `cdd` command line
-skills/          the assistant's guide to the app (sent as its system prompt)
+skills/          the AI's guides: cdd-assistant.md (the app), cdd-design.md (design work)
 src/client/      browser UI: chart rendering (dagre + SVG), panels, run animation
 public/          index.html, styles.css (client bundle builds to public/build)
-test/            end-to-end todo demo, LLM output normalization, assistant tools + CLI
+test/            end-to-end todo demo, LLM output normalization, assistant tools + CLI, design
 ```
 
 `npm test` runs the tests, `npm run typecheck` type-checks everything.

@@ -63,8 +63,21 @@ export function normBubble(raw: unknown, defaultKind: Bubble["kind"]): Bubble | 
   };
   if (typeof o.file === "string" && o.file.trim()) b.file = o.file.trim();
   if (typeof o.symbol === "string" && o.symbol.trim()) b.symbol = o.symbol.trim();
+  const gui = normGui(o.gui);
+  if (gui) b.gui = gui;
   if (kind === "module") b.children = normChart(o.children, "function");
   return b;
+}
+
+/** `gui: true`, `gui: {route, selector}` or null/false (not a UI bubble). */
+export function normGui(v: unknown): Bubble["gui"] | undefined {
+  if (v === true) return {};
+  if (!v || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+  const g: NonNullable<Bubble["gui"]> = {};
+  if (typeof o.route === "string" && o.route.trim()) g.route = "/" + o.route.trim().replace(/^\/+/, "");
+  if (typeof o.selector === "string" && o.selector.trim()) g.selector = o.selector.trim().slice(0, 300);
+  return g;
 }
 
 export function normEdge(raw: unknown, idx: number): Edge | null {
@@ -128,7 +141,10 @@ export function applyOps(pc: ProjectChart, ops: ChartOp[]): string[] {
         const existing = chart.nodes.find((n) => n.id === id);
         if (existing) {
           const merged = normBubble({ ...existing, ...op.node, id, children: op.node.children ?? existing.children }, existing.kind);
-          if (merged) Object.assign(existing, merged);
+          if (merged) {
+            Object.assign(existing, merged);
+            if (!merged.gui) delete existing.gui;
+          }
         } else {
           const b = normBubble({ ...op.node, id }, defaultKind);
           if (b) chart.nodes.push(b);

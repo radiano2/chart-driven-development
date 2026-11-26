@@ -202,10 +202,10 @@ export class ChartView {
 
   private drawNode(n: Bubble, p: { x: number; y: number; width: number; height: number }) {
     const { width: w, height: h } = p;
-    const grp = el("g", { class: `node ${n.kind} ${n.status}`, transform: `translate(${p.x - w / 2},${p.y - h / 2})`, "data-id": n.id, tabindex: 0 }, this.nodesG);
+    const grp = el("g", { class: `node ${n.kind} ${n.status}${n.gui ? " gui" : ""}`, transform: `translate(${p.x - w / 2},${p.y - h / 2})`, "data-id": n.id, tabindex: 0 }, this.nodesG);
     this.nodeBoxes.set(n.id, { x: p.x - w / 2, y: p.y - h / 2, w, h });
     el("rect", { width: w, height: h, rx: n.kind === "module" ? 14 : h / 2, class: "body" }, grp);
-    const kind = n.kind === "module" ? "MODULE" : n.status === "draft" ? "DRAFT" : "FUNCTION";
+    const kind = (n.kind === "module" ? "MODULE" : n.status === "draft" ? "DRAFT" : "FUNCTION") + (n.gui ? " · UI" : "");
     el("text", { x: w / 2, y: n.kind === "module" ? 24 : 21, class: "kind", "text-anchor": "middle" }, grp).textContent = n.status === "draft" ? `${kind} · no code yet` : kind;
     el("text", { x: w / 2, y: n.kind === "module" ? 47 : 41, class: "name", "text-anchor": "middle" }, grp).textContent = truncate(n.name, 24);
     const io = `${n.inputs.length} in · ${n.outputs.length} out${n.kind === "module" ? ` · ${n.children?.nodes.length ?? 0} inside` : ""}`;

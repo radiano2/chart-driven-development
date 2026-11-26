@@ -1,7 +1,9 @@
 // AI implementation backed by a JSON-returning LLM (DeepSeek by default).
 import { getLevel, normChart, normOps, slug } from "../../shared/chart.ts";
 import type {
+  Bubble,
   Chart,
+  StyleGuide,
   ChangeSet,
   FileChange,
   Level,
@@ -12,7 +14,11 @@ import type {
   Stack,
   StackProposal,
 } from "../../shared/types.ts";
-import type { AI, FocusContext, SyncContext, WriteCodeContext } from "./ai.ts";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { normStyle } from "../design/style.ts";
+import type { AI, DesignContext, FocusContext, MockupDraft, SyncContext, WriteCodeContext } from "./ai.ts";
 import type { JsonLLM } from "./deepseek.ts";
 
 const PREAMBLE = `You are the engine of "Chart Driven Development", an app where software is built as a flowchart.
@@ -29,6 +35,7 @@ const CHART_SHAPE = `{
     "description": "what this module is responsible for",
     "inputs": [{"name": "...", "type": "data shape"}], "outputs": [{"name": "...", "type": "data shape"}],
     "file": "path/of/main/file",
+    "gui": { "route": "/", "selector": "#element-id" },  // only for bubbles that draw UI
     "children": {
       "nodes": [ { "id": "kebab-id", "name": "functionName", "kind": "function", "description": "...",
                    "inputs": [...], "outputs": [...], "file": "path/to/file", "symbol": "exactFunctionName" } ],
@@ -46,11 +53,44 @@ const OPS_SHAPE = `"ops": [
 ]
 - parent "root" = the module-level chart (nodes there are modules); a module id = that module's inner chart (nodes there are functions).
 - upsertNode merges into an existing node with the same id, or creates it. A new module needs a root upsertNode with kind "module"; its functions are then upsertNode ops with parent = that module id.
-- Keep chart and code consistent: every function bubble you add or change must have "file" and "symbol", and that symbol must exist in the code you write.`;
+- Keep chart and code consistent: every function bubble you add or change must have "file" and "symbol", and that symbol must exist in the code you write.
+- A bubble that draws UI gets "gui": { "route", "selector" }; put data-bubble="<bubble-id>" on the root element it renders.`;
 
 const FILES_SHAPE = `"files": [ {"path": "relative/path", "content": "FULL new file content"} ]
 - Always give the complete content of every file you change (never a diff or excerpt). Use "content": null to delete a file.
 - Only include files you actually change.`;
+
+const DESIGN_GUIDE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../skills/cdd-design.md");
+
+/** The design guide is read on every call, so edits to skills/cdd-design.md apply right away. */
+export function loadDesignGuide(): string {
+  return readFileSync(DESIGN_GUIDE, "utf8");
+}
+
+const designSystem = () => `${PREAMBLE}\n\n${loadDesignGuide()}`;
+
+function uiBubbles(pc: ProjectChart): string {
+  const out: string[] = [];
+  for (const m of pc.root.nodes) {
+    if (m.gui) out.push(`- ${m.id} (module ${m.name}) gui=${JSON.stringify(m.gui)}: ${m.description}`);
+    for (const f of m.children?.nodes ?? []) if (f.gui) out.push(`- ${f.id} (in ${m.id}, ${f.name}) gui=${JSON.stringify(f.gui)}: ${f.description}`);
+  }
+  return out.join("\n") || "(no bubbles are marked as UI yet)";
+}
+
+function designBlock(ctx: DesignContext): string {
+  return `Project: "${ctx.chart.idea}" (stack: ${ctx.chart.stack?.name ?? "not chosen"})
+UI bubbles:
+${uiBubbles(ctx.chart)}
+
+Current style guide: ${ctx.style ? JSON.stringify(ctx.style) : "(none yet: propose one)"}
+
+Reference images the user gave${ctx.referenceImages.length ? " (the first ones are attached)" : ""}:
+${ctx.references.map((r) => `- ${r.note ? `"${r.note}": ` : ""}${r.description}`).join("\n") || "(none)"}
+
+UI source files:
+${filesBlock(ctx.files, 30_000)}`;
+}
 
 function chartJson(pc: ProjectChart): string {
   return JSON.stringify({ idea: pc.idea, stack: pc.stack, root: pc.root });
@@ -81,6 +121,7 @@ function normStack(raw: unknown): Stack | null {
     runtime: String(o.runtime ?? ""),
     libraries: Array.isArray(o.libraries) ? o.libraries.map(String) : [],
     runCommand: String(o.runCommand ?? ""),
+    ...(typeof o.appUrl === "string" && /^https?:\/\//.test(o.appUrl) ? { appUrl: o.appUrl } : {}),
     reasoning: String(o.reasoning ?? ""),
   };
 }
@@ -118,7 +159,7 @@ export class LlmAI implements AI {
       `The user wants to build: "${idea}".
 Help them pick a tech stack. Prefer simple, popular choices that run locally with few dependencies.
 Return: { "recommended": STACK, "alternatives": [STACK, STACK] }
-STACK = { "name": "short label", "language": "...", "runtime": "...", "libraries": ["..."], "runCommand": "command to start the app", "reasoning": "one or two sentences on why" }`,
+STACK = { "name": "short label", "language": "...", "runtime": "...", "libraries": ["..."], "runCommand": "command to start the app", "appUrl": "http://localhost:<port> the app opens on (web apps only, else omit)", "reasoning": "one or two sentences on why" }`,
     )) as Record<string, unknown>;
     const recommended = normStack(raw.recommended);
     if (!recommended) throw new Error("The AI did not propose a stack");
@@ -134,6 +175,7 @@ Tech stack: ${JSON.stringify(stack)}
 Draw it as a chart of 3 to 6 modules; give each module 2 to 6 function bubbles in its inner chart.
 Each function bubble names the file and the exact symbol the code will define. Assign files so each module owns its own file(s).
 Edges show the main flow of data through the app, numbered in call order.
+Mark every bubble that draws part of the user interface with "gui": { "route": "/path where it shows", "selector": "CSS selector of the element it draws" }.
 Return exactly this shape:
 ${CHART_SHAPE}`,
     );
@@ -256,6 +298,79 @@ Use 4 to 12 steps.`,
     )) as Record<string, unknown>;
     return normTrace(raw, c);
   }
+
+  async readReference(ctx: { chart: ProjectChart; style: StyleGuide | null; image: string; note: string }) {
+    const raw = (await this.llm.json(
+      designSystem(),
+      `Project: "${ctx.chart.idea}"
+Current style guide: ${ctx.style ? JSON.stringify(ctx.style) : "(none yet)"}
+The user attached a reference image${ctx.note ? ` with this note: "${ctx.note}"` : " without a note"}.
+Describe the visual style you see (palette with hex values, type, density, corners, shadows, layout pattern) and
+update the style guide from it, following the design guide.
+Return: { "description": "2 or 3 sentences describing the reference's style", "style": { the full style guide, in the shape the design guide gives } }`,
+      { maxTokens: 2500, images: [ctx.image] },
+    )) as Record<string, unknown>;
+    const style = normStyle(raw.style);
+    if (!style) throw new Error("The AI did not return a style guide for this image");
+    return { description: String(raw.description ?? "").trim().slice(0, 1000), style };
+  }
+
+  async mockup(ctx: DesignContext & { request: string; bubbles: Bubble[] }): Promise<MockupDraft> {
+    const focus = ctx.bubbles.length
+      ? `Focus on these bubbles (show them in context of the screen they live on): ${ctx.bubbles.map((b) => `${b.id} (${b.name})`).join(", ")}`
+      : "Show the app's main screen.";
+    const raw = await this.llm.json(
+      designSystem(),
+      `${designBlock(ctx)}
+
+The user asks for a mockup: "${ctx.request}"
+${focus}
+Follow the design guide's mockup HTML rules and answer format exactly.`,
+      { maxTokens: 8000, images: ctx.referenceImages },
+    );
+    return normMockup(raw, allBubbleIds(ctx.chart));
+  }
+
+  async applyDesign(ctx: DesignContext & { mockup: { title: string; summary: string; html: string } | null }): Promise<ChangeSet> {
+    const target = ctx.mockup
+      ? `Apply the mockup "${ctx.mockup.title}" (${ctx.mockup.summary}) to the app. Its HTML:\n${ctx.mockup.html.slice(0, 30_000)}`
+      : "Apply the current style guide to the app's UI.";
+    const raw = await this.llm.json(
+      designSystem(),
+      `${designBlock(ctx)}
+
+Full chart: ${chartJson(ctx.chart)}
+
+${target}
+Follow "Applying a mockup or style to the code" in the design guide.
+Return: { "summary": "one sentence on what changed", ${OPS_SHAPE},
+${FILES_SHAPE} }`,
+    );
+    return normChangeSet(raw);
+  }
+}
+
+
+export function normMockup(raw: unknown, known: Set<string>): MockupDraft {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const html = String(o.html ?? "").trim();
+  if (!/<(html|body|div|main|section)\b/i.test(html)) throw new Error("The AI did not return mockup HTML");
+  return {
+    title: String(o.title ?? "Mockup").trim().slice(0, 80) || "Mockup",
+    summary: String(o.summary ?? "").trim().slice(0, 800),
+    bubbleIds: (Array.isArray(o.bubbleIds) ? o.bubbleIds : []).map((x) => slug(String(x))).filter((x) => known.has(x)),
+    style: normStyle(o.style),
+    html,
+  };
+}
+
+export function allBubbleIds(pc: ProjectChart): Set<string> {
+  const ids = new Set<string>();
+  for (const m of pc.root.nodes) {
+    ids.add(m.id);
+    for (const f of m.children?.nodes ?? []) ids.add(f.id);
+  }
+  return ids;
 }
 
 export function normTrace(raw: Record<string, unknown>, c: Chart): RunTrace {
