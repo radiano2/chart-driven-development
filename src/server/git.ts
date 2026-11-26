@@ -35,12 +35,17 @@ export async function commitAll(cwd: string, message: string): Promise<boolean> 
 
 /** Paths with uncommitted changes (including untracked files). */
 export async function changedFiles(cwd: string): Promise<string[]> {
-  const out = await git(cwd, ["status", "--porcelain", "-uall"]);
-  return out
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => l.slice(3).replace(/^"|"$/g, ""))
-    .map((p) => (p.includes(" -> ") ? p.split(" -> ")[1] : p));
+  // -z: names come raw (no quoting or escaping of spaces and non-ASCII). A rename is "R  new\0old\0".
+  const out = await git(cwd, ["status", "--porcelain", "-z", "-uall"]);
+  const parts = out.split("\0");
+  const files: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    if (entry.length < 4) continue;
+    files.push(entry.slice(3));
+    if (entry[0] === "R" || entry[0] === "C") i++; // skip the old name
+  }
+  return files;
 }
 
 /** Diff of uncommitted changes, untracked files included. */

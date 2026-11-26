@@ -1,15 +1,15 @@
 // Local web server: JSON API + server-sent events + static UI. Binds to 127.0.0.1 only.
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerEvent } from "../shared/types.ts";
-import type { AI } from "./ai/ai.ts";
-import { DeepSeek } from "./ai/deepseek.ts";
-import { LlmAI } from "./ai/llm.ts";
-import { MockAI } from "./ai/mock.ts";
+import { AssistantHub } from "./agent/hub.ts";
+import { MockToolLLM } from "./agent/mock-llm.ts";
+import { runTool } from "./agent/tools.ts";
 import { HttpError, Workspace } from "./project.ts";
+import { Brain, SettingsStore } from "./settings.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const PUBLIC = path.join(ROOT, "public");
@@ -22,14 +22,38 @@ const MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
 };
 
-export function makeAI(env = process.env): { ai: AI; label: string } {
-  if (env.CDD_AI === "mock") return { ai: new MockAI(), label: "mock (canned todo app)" };
-  const key = env.DEEPSEEK_API_KEY;
-  if (!key) {
-    throw new Error("DEEPSEEK_API_KEY is not set. Put it in .env (see .env.example), or run `npm run start:mock` to try the app offline.");
+/** Load .env and settings, set up the AI and open the workspace. Shared by the server and the `cdd` CLI. */
+export function setup(env = process.env) {
+  if (existsSync(path.join(ROOT, ".env"))) process.loadEnvFile(path.join(ROOT, ".env"));
+  const settings = new SettingsStore(path.resolve(env.CDD_SETTINGS || path.join(ROOT, ".cdd", "settings.json")), env);
+  const brain = new Brain(settings);
+  const workspace = path.resolve(env.CDD_WORKSPACE || path.join(ROOT, "projects"));
+  return { brain, tools: brain.tools, workspace, ws: new Workspace(workspace, brain.ai) };
+}
+
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Only the app's own page may call the API. Blocks other websites (CSRF) and DNS-rebinding,
+ * which matters because the API can change files and run commands.
+ */
+function checkLocalRequest(req: http.IncomingMessage) {
+  const host = (req.headers.host ?? "").replace(/:\d+$/, "");
+  if (!LOCAL_HOSTS.has(host)) throw new HttpError(403, "Requests must come from localhost");
+  const origin = req.headers.origin;
+  if (origin) {
+    let o: URL;
+    try {
+      o = new URL(origin);
+    } catch {
+      throw new HttpError(403, "Bad origin");
+    }
+    // Same host AND port as this server: another app on localhost doesn't count as us.
+    if (o.host !== req.headers.host) throw new HttpError(403, "Cross-site requests are not allowed");
   }
-  const model = env.DEEPSEEK_MODEL || "deepseek-chat";
-  return { ai: new LlmAI(new DeepSeek({ apiKey: key, model, baseUrl: env.DEEPSEEK_BASE_URL })), label: `DeepSeek (${model})` };
+  if (req.method !== "GET" && !String(req.headers["content-type"] ?? "").startsWith("application/json")) {
+    throw new HttpError(415, "Send JSON (content-type: application/json)");
+  }
 }
 
 async function body(req: http.IncomingMessage): Promise<Record<string, unknown>> {
@@ -39,11 +63,14 @@ async function body(req: http.IncomingMessage): Promise<Record<string, unknown>>
     if (raw.length > 2_000_000) throw new HttpError(413, "Request too large");
   }
   if (!raw) return {};
+  let data: unknown;
   try {
-    return JSON.parse(raw);
+    data = JSON.parse(raw);
   } catch {
     throw new HttpError(400, "Invalid JSON");
   }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new HttpError(400, "Send a JSON object");
+  return data as Record<string, unknown>;
 }
 
 function send(res: http.ServerResponse, status: number, data: unknown) {
@@ -56,15 +83,37 @@ const str = (v: unknown, name: string): string => {
   return v;
 };
 
-export function createServer(ws: Workspace, aiLabel: string) {
+export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = new AssistantHub(new MockToolLLM())) {
+  const brain = typeof brainOrLabel === "string" ? null : brainOrLabel;
+  const label = () => (brain ? brain.label : (brainOrLabel as string));
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     try {
+      let parts: string[];
+      try {
+        parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      } catch {
+        throw new HttpError(400, "Malformed URL");
+      }
       if (parts[0] !== "api") return await serveStatic(url.pathname, res);
+      checkLocalRequest(req);
       const method = req.method ?? "GET";
 
-      if (parts.length === 2 && parts[1] === "info") return send(res, 200, { ai: aiLabel, workspace: ws.root });
+      if (parts.length === 2 && parts[1] === "info") return send(res, 200, { ai: label(), workspace: ws.root, needsKey: brain ? !brain.settings.mock && !brain.settings.key() : false });
+      if (parts[1] === "settings") {
+        if (!brain) throw new HttpError(404, "Settings are not available");
+        if (parts.length === 2 && method === "GET") return send(res, 200, brain.settings.status());
+        if (parts.length === 2 && method === "PUT") {
+          const b = await body(req);
+          brain.update(typeof b.deepseekApiKey === "string" ? { deepseekApiKey: b.deepseekApiKey } : {});
+          return send(res, 200, { ...brain.settings.status(), ai: brain.label });
+        }
+        if (parts.length === 3 && parts[2] === "test" && method === "POST") {
+          const b = await body(req);
+          return send(res, 200, await brain.settings.test(typeof b.deepseekApiKey === "string" ? b.deepseekApiKey : undefined));
+        }
+        throw new HttpError(404, "Not found");
+      }
       if (parts.length === 2 && parts[1] === "projects") {
         if (method === "GET") return send(res, 200, await ws.list());
         if (method === "POST") {
@@ -88,6 +137,8 @@ export function createServer(ws: Workspace, aiLabel: string) {
             return send(res, 200, { path: url.searchParams.get("path"), content: await p.readSourceFile(str(url.searchParams.get("path"), "path")) });
           case "events":
             return streamEvents(p.events, req, res);
+          case "assistant":
+            return send(res, 200, hub.transcript(p));
         }
       }
 
@@ -97,8 +148,11 @@ export function createServer(ws: Workspace, aiLabel: string) {
         switch (action) {
           case "stack":
             return send(res, 200, await p.proposeStack());
-          case "generate":
+          case "generate": {
+            const stack = b.stack as { name?: unknown } | undefined;
+            if (!stack || typeof stack !== "object" || typeof stack.name !== "string") throw new HttpError(400, 'Missing "stack"');
             return send(res, 200, { chart: await p.generate(b.stack as never) });
+          }
           case "recommend":
             return send(res, 200, await p.recommend(level, str(b.bubbleId, "bubbleId"), str(b.request, "request")));
           case "apply":
@@ -121,6 +175,19 @@ export function createServer(ws: Workspace, aiLabel: string) {
             return send(res, 200, await p.syncFromCode());
           case "accept-outside":
             return send(res, 200, await p.acceptOutside());
+          case "assistant":
+            return send(res, 200, await hub.get(p).ask(str(b.message, "message"), typeof b.context === "string" ? b.context.slice(0, 2000) : undefined));
+          case "assistant/cancel":
+            hub.cancel(p);
+            return send(res, 200, { ok: true });
+          case "assistant/approve":
+            if (!hub.resolve(p.name, str(b.id, "id"), b.allow === true)) throw new HttpError(404, "No such request (it may have timed out)");
+            return send(res, 200, { ok: true });
+          case "assistant/reset":
+            hub.get(p).reset();
+            return send(res, 200, { ok: true });
+          case "open-folder":
+            return send(res, 200, { message: await runTool("open_folder", {}, { project: p, approve: async () => false, changed: new Set(), pendingMessage: "" }) });
         }
       }
       throw new HttpError(404, "Not found");
@@ -150,29 +217,21 @@ function streamEvents(events: NodeJS.EventEmitter, req: http.IncomingMessage, re
 async function serveStatic(pathname: string, res: http.ServerResponse) {
   const rel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   const abs = path.resolve(PUBLIC, rel);
-  if (!abs.startsWith(PUBLIC + path.sep) || !existsSync(abs)) throw new HttpError(404, "Not found");
+  if (!abs.startsWith(PUBLIC + path.sep) || !existsSync(abs) || !statSync(abs).isFile()) throw new HttpError(404, "Not found");
   res.writeHead(200, { "content-type": MIME[path.extname(abs)] ?? "application/octet-stream" });
   res.end(await readFile(abs));
 }
 
 async function main() {
-  if (existsSync(path.join(ROOT, ".env"))) process.loadEnvFile(path.join(ROOT, ".env"));
-  let ai: { ai: AI; label: string };
-  try {
-    ai = makeAI();
-  } catch (e) {
-    console.error((e as Error).message);
-    process.exit(1);
-  }
-  const workspace = path.resolve(process.env.CDD_WORKSPACE || path.join(ROOT, "projects"));
-  const ws = new Workspace(workspace, ai.ai);
+  const cfg = setup();
   const port = Number(process.env.PORT) || 4317;
-  createServer(ws, ai.label).listen(port, "127.0.0.1", () => {
+  createServer(cfg.ws, cfg.brain, new AssistantHub(cfg.tools)).listen(port, "127.0.0.1", () => {
     console.log(`Chart Driven Development: http://localhost:${port}`);
-    console.log(`AI: ${ai.label}   Projects folder: ${workspace}`);
+    console.log(`AI: ${cfg.brain.label}   Projects folder: ${cfg.workspace}`);
+    if (!cfg.brain.settings.mock && !cfg.brain.settings.key()) console.log("No DeepSeek API key yet: add it in the app under Settings.");
   });
   process.on("SIGINT", () => {
-    ws.closeAll();
+    cfg.ws.closeAll();
     process.exit(0);
   });
 }

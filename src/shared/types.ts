@@ -127,8 +127,19 @@ export interface ProjectSummary {
   hasChart: boolean;
 }
 
+/** What the assistant is doing, streamed to the UI / CLI. */
+export type AssistantEvent =
+  | { kind: "thinking" }
+  | { kind: "note"; text: string }
+  | { kind: "tool"; name: string; summary: string }
+  | { kind: "tool-result"; name: string; ok: boolean; summary: string }
+  | { kind: "approval"; id: string; command: string }
+  | { kind: "approval-resolved"; id: string; allowed: boolean }
+  | { kind: "reply"; text: string; changed: string[] };
+
 export type ServerEvent =
   | { type: "progress"; message: string }
   | { type: "chart"; chart: ProjectChart }
   | { type: "outside-change"; files: string[] }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "assistant"; event: AssistantEvent };

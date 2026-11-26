@@ -35,6 +35,7 @@ interface State {
   drawing: boolean;
   run: { trace: RunTrace; current: number } | null;
   history: boolean;
+  assistant: boolean;
   outside: string[];
 }
 
@@ -50,10 +51,29 @@ const state: State = {
   drawing: false,
   run: null,
   history: false,
+  assistant: false,
   outside: [],
 };
 
 let events: EventSource | null = null;
+
+type ChatItem =
+  | { kind: "user"; text: string }
+  | { kind: "reply"; text: string; changed?: string[] }
+  | { kind: "activity"; text: string; ok: boolean }
+  | { kind: "approval"; id: string; command: string; answer?: boolean };
+interface Chat {
+  items: ChatItem[];
+  busy: boolean;
+  draft: string;
+}
+/** One conversation per project, so a reply that arrives after switching projects lands in the right one. */
+const chats = new Map<string, Chat>();
+function chatFor(project: string): Chat {
+  let c = chats.get(project);
+  if (!c) chats.set(project, (c = { items: [], busy: false, draft: "" }));
+  return c;
+}
 
 /** Display name for a reference like "storage" or "storage/save-todos". */
 function ghostLabel(ref: string): string {
@@ -120,8 +140,8 @@ async function guard<T>(label: string, fn: () => Promise<T>): Promise<T | undefi
 
 // ---------- navigation ----------
 
-function show(page: "home" | "stack-page" | "workspace") {
-  for (const id of ["home", "stack-page", "workspace"]) $(id).hidden = id !== page;
+function show(page: "home" | "stack-page" | "workspace" | "settings-page") {
+  for (const id of ["home", "stack-page", "workspace", "settings-page"]) $(id).hidden = id !== page;
 }
 
 async function goHome() {
@@ -150,10 +170,11 @@ async function goHome() {
 
 function subscribe(name: string) {
   events?.close();
-  events = api.events(name, onServerEvent);
+  events = api.events(name, (ev) => onServerEvent(name, ev));
 }
 
-function onServerEvent(ev: ServerEvent) {
+function onServerEvent(project: string, ev: ServerEvent) {
+  if (project !== state.project) return;
   if (ev.type === "progress") {
     if (state.busy && ev.message !== "Done") $("status-text").textContent = ev.message;
     const log = $("gen-log");
@@ -164,6 +185,19 @@ function onServerEvent(ev: ServerEvent) {
   } else if (ev.type === "outside-change") {
     state.outside = ev.files;
     renderBanner();
+  } else if (ev.type === "assistant") {
+    const e = ev.event;
+    const chat = chatFor(project);
+    if (e.kind === "tool") chat.items.push({ kind: "activity", text: e.summary, ok: true });
+    else if (e.kind === "tool-result" && !e.ok) chat.items.push({ kind: "activity", text: e.summary, ok: false });
+    else if (e.kind === "approval") {
+      chat.items.push({ kind: "approval", id: e.id, command: e.command });
+      if (!state.assistant) openAssistant();
+    } else if (e.kind === "approval-resolved") {
+      const item = chat.items.find((i) => i.kind === "approval" && i.id === e.id);
+      if (item && item.kind === "approval") item.answer = e.allowed;
+    } else return;
+    if (state.assistant) renderPanel();
   }
 }
 
@@ -173,6 +207,17 @@ async function openProject(name: string) {
   state.project = name;
   state.chart = data.chart;
   state.outside = data.outside;
+  const chat = chatFor(name);
+  if (!chat.busy) {
+    api
+      .assistantTranscript(name)
+      .then((t) => {
+        if (chat.busy) return; // a turn started meanwhile; keep its live items
+        chat.items = t.map((m): ChatItem => (m.role === "user" ? { kind: "user", text: m.text } : { kind: "reply", text: m.text }));
+        if (state.project === name && state.assistant) renderPanel();
+      })
+      .catch(() => undefined);
+  }
   subscribe(name);
   if (!data.chart.root.nodes.length) return startStackChoice(name, data.chart.idea);
   history.replaceState(null, "", `/?p=${encodeURIComponent(name)}`);
@@ -202,6 +247,7 @@ function resetPanelState() {
   state.drawing = false;
   state.run = null;
   state.history = false;
+  state.assistant = false;
   state.lastResult = null;
 }
 
@@ -281,6 +327,7 @@ function renderPanel() {
   panel.replaceChildren();
   if (!state.chart) return;
   if (state.run) return panel.append(runPanel(state.run));
+  if (state.assistant) return panel.append(assistantPanel());
   if (state.history) {
     panel.append(historyPanel());
     return;
@@ -698,6 +745,118 @@ $("new-form").addEventListener("submit", (e) => {
   });
 });
 
+// ---------- assistant ----------
+
+function openAssistant() {
+  view.stopRun();
+  state.run = null;
+  state.drawing = false;
+  state.history = false;
+  state.assistant = true;
+  renderPanel();
+}
+
+function assistantPanel() {
+  const name = state.project!;
+  const chat = chatFor(name);
+  const wrap = h("div", { class: "panel-body assistant" });
+  wrap.append(
+    h(
+      "div",
+      { class: "assistant-head" },
+      h("div", {}, h("p", { class: "eyebrow" }, "Assistant"), h("h2", {}, "Ask DeepSeek to work on this project")),
+      h("button", { onclick: () => ((state.assistant = false), renderPanel()) }, "Close"),
+    ),
+    h("p", { class: "small muted" }, "It can read and change the code and the chart, look at versions, and run install/test/build. Other commands ask you first. Each answer is saved as one version you can undo."),
+  );
+  const log = h("div", { class: "chat-log" });
+  if (!chat.items.length) log.append(h("p", { class: "muted small" }, 'Try: "add a priority to todos and show it in the list", or "run the tests".'));
+  for (const it of chat.items) {
+    if (it.kind === "user") log.append(h("div", { class: "msg user" }, it.text));
+    else if (it.kind === "reply")
+      log.append(h("div", { class: "msg reply" }, it.text, it.changed?.length ? h("p", { class: "small muted" }, `Saved as a new version · ${it.changed.join(", ")}`) : null));
+    else if (it.kind === "activity") log.append(h("div", { class: `activity${it.ok ? "" : " failed"}` }, `${it.ok ? "→" : "✗"} ${it.text}`));
+    else {
+      const answer = (allow: boolean) => () =>
+        api.approve(name, it.id, allow).catch((e) => toast((e as Error).message, "error"));
+      log.append(
+        h(
+          "div",
+          { class: "approval" },
+          h("p", {}, "The assistant wants to run:"),
+          h("code", {}, it.command),
+          it.answer === undefined
+            ? h("div", { class: "actions" }, h("button", { class: "primary", onclick: answer(true) }, "Allow once"), h("button", { onclick: answer(false) }, "Don't allow"))
+            : h("p", { class: "small muted" }, it.answer ? "Allowed." : "Not allowed."),
+        ),
+      );
+    }
+  }
+  if (chat.busy) log.append(h("div", { class: "activity working" }, h("span", { class: "spinner" }), " Working…"));
+  wrap.append(log);
+
+  const ta = h("textarea", { rows: 3, placeholder: "What should the assistant do?", disabled: chat.busy }) as HTMLTextAreaElement;
+  ta.value = chat.draft;
+  ta.addEventListener("input", () => (chat.draft = ta.value));
+  const b = currentBubble();
+  const send = () => {
+    const text = ta.value.trim();
+    if (!text || chat.busy) return;
+    const context = b ? `[Selected bubble: ${b.name} (id "${b.id}") at level "${state.level}"]` : state.level !== "root" ? `[Looking at module "${state.level}"]` : undefined;
+    chat.items.push({ kind: "user", text });
+    chat.draft = "";
+    chat.busy = true;
+    renderPanel();
+    api
+      .assistant(name, text, context)
+      .then((r) => chat.items.push({ kind: "reply", text: r.reply, changed: r.committed ? r.changed : [] }))
+      .catch((e) => chat.items.push({ kind: "reply", text: `Error: ${(e as Error).message}` }))
+      .finally(() => {
+        chat.busy = false;
+        if (state.project === name && state.assistant) renderPanel();
+      });
+  };
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+  wrap.append(
+    h(
+      "div",
+      { class: "chat-input" },
+      b ? h("p", { class: "small muted" }, `About: ${b.name}`) : null,
+      ta,
+      h(
+        "div",
+        { class: "actions" },
+        chat.busy
+          ? h("button", { onclick: () => void api.cancelAssistant(name).catch((e) => toast((e as Error).message, "error")) }, "Stop")
+          : h("button", { class: "primary", onclick: send }, "Send"),
+        h(
+          "button",
+          {
+            class: "link",
+            disabled: chat.busy,
+            onclick: () =>
+              void api.resetAssistant(name).then(() => {
+                chat.items = [];
+                renderPanel();
+              }),
+          },
+          "New conversation",
+        ),
+      ),
+    ),
+  );
+  requestAnimationFrame(() => {
+    log.scrollTop = log.scrollHeight;
+    if (!chat.busy) ta.focus();
+  });
+  return wrap;
+}
+
 // ---------- toolbar ----------
 
 $("home-link").addEventListener("click", () => void goHome());
@@ -706,6 +865,7 @@ $("btn-draw").addEventListener("click", () => {
   view.stopRun();
   state.run = null;
   state.history = false;
+  state.assistant = false;
   state.drawing = true;
   renderPanel();
   ($("panel").querySelector("input") as HTMLInputElement | null)?.focus();
@@ -731,10 +891,16 @@ $("btn-undo").addEventListener("click", () => {
     toast("Undone. The previous version of the code and chart is back.");
   });
 });
+$("btn-assistant").addEventListener("click", () => (state.assistant ? ((state.assistant = false), renderPanel()) : openAssistant()));
+$("btn-folder").addEventListener("click", () => {
+  const name = state.project;
+  if (name) api.openFolder(name).then((r) => toast(r.message), (e) => toast((e as Error).message, "error"));
+});
 $("btn-history").addEventListener("click", () => {
   view.stopRun();
   state.run = null;
   state.drawing = false;
+  state.assistant = false;
   state.history = !state.history;
   renderPanel();
 });
@@ -752,10 +918,95 @@ window.addEventListener("resize", () => !$("workspace").hidden && view.fit());
 
 // ---------- boot ----------
 
-api
-  .info()
-  .then((i) => ($("ai-label").textContent = `AI: ${i.ai}`))
-  .catch(() => undefined);
+// ---------- settings ----------
+
+function refreshInfo() {
+  return api
+    .info()
+    .then((i) => {
+      $("ai-label").textContent = `AI: ${i.ai}`;
+      $("key-banner").hidden = !i.needsKey;
+    })
+    .catch(() => undefined);
+}
+
+let beforeSettings: (() => void) | null = null;
+
+async function openSettings() {
+  const wasWorkspace = !$("workspace").hidden && state.project;
+  beforeSettings = wasWorkspace ? () => (show("workspace"), renderChart(true)) : () => void goHome();
+  show("settings-page");
+  $("settings-result").textContent = "";
+  ($("set-key") as HTMLInputElement).value = "";
+  try {
+    renderSettings(await api.settings());
+  } catch (e) {
+    $("settings-status").replaceChildren(h("p", { class: "error" }, (e as Error).message));
+  }
+  ($("set-key") as HTMLInputElement).focus();
+}
+
+function renderSettings(s: import("./api.ts").SettingsStatus) {
+  $("settings-file").textContent = s.file;
+  $("settings-model").textContent = s.model;
+  const line = s.mock
+    ? "The app is running in mock mode (CDD_AI=mock), so no key is used until you restart it normally."
+    : s.keySource === "settings"
+      ? `Using the key saved here (ending ${s.keyHint}).`
+      : s.keySource === "env"
+        ? `Using DEEPSEEK_API_KEY from .env / environment (ending ${s.keyHint}). A key saved here takes priority.`
+        : "No key yet.";
+  $("settings-status").replaceChildren(h("p", { class: s.hasKey || s.mock ? "ok" : "warn" }, line));
+  $("set-remove").hidden = s.keySource !== "settings";
+}
+
+function settingsResult(text: string, ok: boolean) {
+  const r = $("settings-result");
+  r.textContent = text;
+  r.className = `small ${ok ? "ok" : "error"}`;
+}
+
+$("btn-settings").addEventListener("click", () => void openSettings());
+$("key-banner-btn").addEventListener("click", () => void openSettings());
+$("settings-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const key = ($("set-key") as HTMLInputElement).value.trim();
+  if (!key) return settingsResult("Paste a key first.", false);
+  void guard("Checking the key…", async () => {
+    // Check a new key BEFORE saving it, so a typo never replaces a working key.
+    // Refuse only a key DeepSeek says is wrong (401); no balance or no network isn't the key's fault.
+    const t = await api.testKey(key);
+    if (t.invalid) return settingsResult(`Not saved: ${t.message}`, false);
+    const note = t.ok ? "" : t.message;
+    const s = await api.saveSettings({ deepseekApiKey: key });
+    ($("set-key") as HTMLInputElement).value = "";
+    renderSettings(s);
+    await refreshInfo();
+    if (note) settingsResult(`Saved. Note: ${note}`, false);
+    else settingsResult("The key works and is saved.", true);
+  });
+});
+$("set-done").addEventListener("click", () => beforeSettings?.());
+$("set-test").addEventListener("click", () => {
+  const key = ($("set-key") as HTMLInputElement).value.trim();
+  void guard("Testing…", async () => {
+    const t = await api.testKey(key || undefined);
+    settingsResult(t.message, t.ok);
+  });
+});
+$("set-remove").addEventListener("click", () => {
+  if (!confirm("Remove the DeepSeek key saved in the app?")) return;
+  void guard("Removing…", async () => {
+    renderSettings(await api.saveSettings({ deepseekApiKey: "" }));
+    await refreshInfo();
+    settingsResult("Removed.", true);
+  });
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("settings-page").hidden) beforeSettings?.();
+});
+
+void refreshInfo();
 const initial = new URLSearchParams(location.search).get("p");
 if (initial) void openProject(initial).then(() => {
     if (!state.project) void goHome();

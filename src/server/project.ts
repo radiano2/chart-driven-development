@@ -1,6 +1,6 @@
 // A generated project: a normal folder on disk with real code, a git repo, and the chart in .chart/chart.json.
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { applyOps, filesOf, findBubble, getLevel, normBubble, normEdge, slug } from "../shared/chart.ts";
@@ -30,14 +30,54 @@ export class HttpError extends Error {
   }
 }
 
-/** Resolve a project-relative path, refusing anything that escapes the folder or touches .git / .chart. */
+/** Compare path segments the way a case-insensitive filesystem (macOS, Windows) would. */
+function fold(segment: string): string {
+  return segment.toLowerCase().replace(/[. ]+$/, "");
+}
+
+function realOrNull(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a project-relative path, refusing anything that escapes the folder (including through symlinks),
+ * touches a .git folder (at any depth) or the project's own .chart folder (at the root). Used for every file the app or the AI reads or writes.
+ */
 export function safePath(root: string, rel: string): string {
-  const clean = rel.replace(/\\/g, "/").replace(/^\/+/, "");
+  const escape = () => new HttpError(400, `Path escapes project: ${rel}`);
+  const clean = String(rel).replace(/\\/g, "/").replace(/^\/+/, "");
   const abs = path.resolve(root, clean);
-  if (abs !== root && !abs.startsWith(root + path.sep)) throw new HttpError(400, `Path escapes project: ${rel}`);
-  const first = clean.split("/")[0];
-  if (first === ".git" || first === ".chart") throw new HttpError(400, `Reserved path: ${rel}`);
+  const relative = path.relative(root, abs);
+  if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw escape();
+  const segs = relative.split(path.sep).filter(Boolean);
+  if (segs.some((s) => fold(s) === ".git") || (segs.length && fold(segs[0]) === ".chart")) {
+    throw new HttpError(400, `Reserved path: ${rel}`);
+  }
+  // Symlinks: the nearest existing ancestor (or the file itself) must really live inside the project.
+  const realRoot = realOrNull(root) ?? root;
+  let probe = abs;
+  while (probe !== root && !lstatOrNull(probe)) probe = path.dirname(probe);
+  const real = realOrNull(probe);
+  if (!real) throw escape(); // dangling symlink
+  if (real !== realRoot && !real.startsWith(realRoot + path.sep)) throw escape();
+  if (real !== probe && probe !== root) {
+    // Followed a symlink inside the project: re-check the reserved names on the real path.
+    const realSegs = path.relative(realRoot, real).split(path.sep).filter(Boolean);
+    if (realSegs.some((s) => fold(s) === ".git") || (realSegs.length && fold(realSegs[0]) === ".chart")) throw new HttpError(400, `Reserved path: ${rel}`);
+  }
   return abs;
+}
+
+function lstatOrNull(p: string) {
+  try {
+    return lstatSync(p);
+  } catch {
+    return null;
+  }
 }
 
 export class Project {
@@ -60,7 +100,7 @@ export class Project {
   }
 
   /** Run project operations one at a time; file watching is paused while the app itself writes. */
-  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+  exclusive<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.queue.then(async () => {
       this.busy++;
       try {
@@ -82,13 +122,13 @@ export class Project {
     }
   }
 
-  private async saveChart(pc: ProjectChart) {
+  async saveChart(pc: ProjectChart) {
     await mkdir(path.join(this.dir, ".chart"), { recursive: true });
     await writeFile(path.join(this.dir, CHART_FILE), JSON.stringify(pc, null, 2) + "\n");
     this.emit({ type: "chart", chart: pc });
   }
 
-  private async writeFiles(files: FileChange[]): Promise<string[]> {
+  async writeFiles(files: FileChange[]): Promise<string[]> {
     const written: string[] = [];
     for (const f of files) {
       const abs = safePath(this.dir, f.path);
@@ -124,9 +164,11 @@ export class Project {
     }
   }
 
-  private async commit(message: string) {
-    await git.commitAll(this.dir, message);
+  /** Stage and commit everything. Returns false when there was nothing to commit. */
+  async commit(message: string): Promise<boolean> {
+    const made = await git.commitAll(this.dir, message);
     this.lastOutside = "";
+    return made;
   }
 
   // ---------- creation ----------
@@ -289,24 +331,34 @@ export class Project {
   }
 
   restore(sha: string) {
-    return this.exclusive(async () => {
-      // Keep any outside edits in history before replacing the working tree.
-      await this.commit("Save outside edits before restoring");
-      const entries = await git.history(this.dir, 200);
-      const target = entries.find((e) => e.sha.startsWith(sha));
-      if (!target) throw new HttpError(404, "Unknown version");
-      await git.restore(this.dir, target.sha, `Restore: ${target.message.split("\n")[0]}`);
-      const pc = await this.loadChart();
-      this.emit({ type: "chart", chart: pc });
-      return { chart: pc };
-    });
+    return this.exclusive(() => this.restoreUnlocked(sha));
+  }
+
+  /** Restore without taking the project lock (for callers that already hold it, like the assistant). */
+  async restoreUnlocked(sha: string, pendingMessage = "Save outside edits before restoring") {
+    // Keep any uncommitted edits in history before replacing the working tree.
+    await this.commit(pendingMessage);
+    // At least 4 hex characters, so a stray "a" can't pick some random version.
+    if (!/^[0-9a-f]{4,40}$/i.test(sha.trim())) throw new HttpError(400, "Invalid version id");
+    const entries = await git.history(this.dir, 200);
+    const target = entries.find((e) => e.sha.startsWith(sha.trim().toLowerCase()));
+    if (!target) throw new HttpError(404, "Unknown version");
+    await git.restore(this.dir, target.sha, `Restore: ${target.message.split("\n")[0]}`);
+    const pc = await this.loadChart();
+    this.emit({ type: "chart", chart: pc });
+    return { chart: pc };
   }
 
   /** Go back one step: restore the version before the latest commit. */
   async undo() {
+    return this.exclusive(() => this.undoUnlocked());
+  }
+
+  async undoUnlocked(pendingMessage?: string) {
+    if (pendingMessage) await this.commit(pendingMessage);
     const entries = await git.history(this.dir, 2);
     if (entries.length < 2) throw new HttpError(400, "Nothing to undo");
-    return this.restore(entries[1].sha);
+    return this.restoreUnlocked(entries[1].sha);
   }
 
   // ---------- outside edits ----------

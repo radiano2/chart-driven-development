@@ -4,6 +4,15 @@ export interface JsonLLM {
   json(system: string, user: string, opts?: { maxTokens?: number }): Promise<unknown>;
 }
 
+/** DeepSeek flash is the only model the app uses. */
+export const DEEPSEEK_MODEL = "deepseek-flash";
+/** Flash thinks before it answers, and the thinking counts toward max_tokens, so leave plenty of room. */
+const MAX_TOKENS = 32_000;
+/** Added on top of a caller's answer budget, so thinking can't use up a small limit (e.g. 2000) before the answer. */
+const THINKING_ROOM = 16_000;
+/** Thinking plus a long answer can take minutes. */
+const TIMEOUT_MS = 600_000;
+
 export interface DeepSeekOptions {
   apiKey: string;
   model?: string;
@@ -19,15 +28,15 @@ export class DeepSeek implements JsonLLM {
 
   constructor(opts: DeepSeekOptions) {
     this.apiKey = opts.apiKey;
-    this.model = opts.model || "deepseek-chat";
+    this.model = opts.model || DEEPSEEK_MODEL;
     this.baseUrl = (opts.baseUrl || "https://api.deepseek.com").replace(/\/+$/, "");
-    this.timeoutMs = opts.timeoutMs ?? 240_000;
+    this.timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
   }
 
   async json(system: string, user: string, opts: { maxTokens?: number } = {}): Promise<unknown> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const content = await this.chat(system, user, opts.maxTokens ?? 8000);
+      const content = await this.chat(system, user, opts.maxTokens ? opts.maxTokens + THINKING_ROOM : MAX_TOKENS);
       try {
         return parseJsonLoose(content);
       } catch (e) {
@@ -48,7 +57,6 @@ export class DeepSeek implements JsonLLM {
           { role: "user", content: user },
         ],
         response_format: { type: "json_object" },
-        temperature: 0.2,
         max_tokens: maxTokens,
       }),
       signal: AbortSignal.timeout(this.timeoutMs),
@@ -60,8 +68,8 @@ export class DeepSeek implements JsonLLM {
     const data = (await res.json()) as { choices?: { message?: { content?: string }; finish_reason?: string }[] };
     const choice = data.choices?.[0];
     const content = choice?.message?.content;
-    if (!content) throw new Error("DeepSeek returned an empty response");
     if (choice?.finish_reason === "length") throw new Error("DeepSeek response was cut off (too long). Try a smaller change.");
+    if (!content) throw new Error("DeepSeek returned an empty response");
     return content;
   }
 }
@@ -75,5 +83,63 @@ export function parseJsonLoose(text: string): unknown {
     const end = trimmed.lastIndexOf("}");
     if (start >= 0 && end > start) return JSON.parse(trimmed.slice(start, end + 1));
     throw new Error("No JSON object found");
+  }
+}
+
+// ---------- function calling (used by the assistant) ----------
+
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+export type ChatMessage =
+  | { role: "system" | "user"; content: string }
+  // reasoning_content is flash's thinking. With tools, DeepSeek requires it to be sent back on every later request
+  // (it answers 400 otherwise), so it is kept in the history as it came.
+  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[]; reasoning_content?: string }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+export interface ToolDef {
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+
+/** A chat model that can call tools (OpenAI-compatible function calling). */
+export interface ToolLLM {
+  chat(messages: ChatMessage[], tools: ToolDef[]): Promise<{ content: string | null; tool_calls?: ToolCall[]; reasoning_content?: string }>;
+}
+
+export class DeepSeekTools implements ToolLLM {
+  private apiKey: string;
+  private model: string;
+  private baseUrl: string;
+
+  constructor(opts: DeepSeekOptions) {
+    this.apiKey = opts.apiKey;
+    this.model = opts.model || DEEPSEEK_MODEL;
+    this.baseUrl = (opts.baseUrl || "https://api.deepseek.com").replace(/\/+$/, "");
+  }
+
+  async chat(messages: ChatMessage[], tools: ToolDef[]) {
+    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify({ model: this.model, messages, tools, max_tokens: MAX_TOKENS }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`DeepSeek API error ${res.status}: ${body.slice(0, 500)}`);
+    }
+    const data = (await res.json()) as { choices?: { message?: { content?: string | null; tool_calls?: ToolCall[]; reasoning_content?: string | null } }[] };
+    const msg = data.choices?.[0]?.message;
+    if (!msg) throw new Error("DeepSeek returned an empty response");
+    return {
+      content: msg.content ?? null,
+      tool_calls: msg.tool_calls?.length ? msg.tool_calls : undefined,
+      reasoning_content: msg.reasoning_content ?? undefined,
+    };
   }
 }
