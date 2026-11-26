@@ -1,7 +1,7 @@
 // A generated project: a normal folder on disk with real code, a git repo, and the chart in .chart/chart.json.
 import { EventEmitter } from "node:events";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { applyOps, filesOf, findBubble, getLevel, normBubble, normEdge, slug } from "../shared/chart.ts";
 import type {
@@ -18,6 +18,7 @@ import type {
   ProjectSummary,
   Recommendation,
   RecommendationOption,
+  RunChatMessage,
   RunTrace,
   ServerEvent,
   Stack,
@@ -429,6 +430,17 @@ export class Project {
     });
   }
 
+  /** Answer a question about a run. Only reads the chart, so it doesn't wait for other work on the project. */
+  async explainRun(level: Level, trace: RunTrace, history: RunChatMessage[], question: string): Promise<string> {
+    const pc = await this.loadChart();
+    // The trace comes back from the browser: keep it small.
+    const small: RunTrace = {
+      scenario: String(trace.scenario ?? "").slice(0, 300),
+      steps: trace.steps.slice(0, 20).map((s) => ({ nodeId: String(s.nodeId).slice(0, 120), data: String(s.data ?? "").slice(0, 200), note: String(s.note ?? "").slice(0, 300) })),
+    };
+    return this.ai.explainRun({ chart: pc, level, trace: small, history, question });
+  }
+
   // ---------- history ----------
 
   history(): Promise<HistoryEntry[]> {
@@ -614,7 +626,7 @@ export class Workspace {
     await mkdir(this.root, { recursive: true });
     const out: ProjectSummary[] = [];
     for (const d of await readdir(this.root, { withFileTypes: true })) {
-      if (!d.isDirectory()) continue;
+      if (!d.isDirectory() || d.name.startsWith(".")) continue;
       try {
         const pc = JSON.parse(await readFile(path.join(this.root, d.name, CHART_FILE), "utf8")) as ProjectChart;
         out.push({ name: d.name, idea: pc.idea, hasChart: pc.root.nodes.length > 0 });
@@ -663,14 +675,54 @@ export class Workspace {
 
   /** Stop remembering a folder opened from elsewhere. Its files, chart and git history stay as they are. */
   forget(name: string) {
-    const links = this.linked();
-    const i = links.findIndex((l) => l.name === name);
-    if (i < 0) throw new HttpError(400, `"${name}" lives in the app's projects folder; delete its folder there to remove it`);
-    links.splice(i, 1);
-    this.saveLinks();
-    this.open.get(name)?.close();
+    if (!this.linked().some((l) => l.name === name)) throw new HttpError(400, `"${name}" lives in the app's projects folder; delete its folder there to remove it`);
+    return this.remove(name, { deleteFolder: false });
+  }
+
+  /**
+   * Take a project off the list. By default nothing is lost: a folder opened from elsewhere is just forgotten, and a
+   * project the app made is moved to <projects>/.removed/ (move it back to restore it). With `deleteFolder`, the
+   * project's folder (code, chart and git history) is deleted from disk for good.
+   */
+  async remove(name: string, opts: { deleteFolder: boolean }): Promise<{ ok: true; message: string }> {
+    if (slug(name) !== name) throw new HttpError(400, "Invalid project name");
+    const linkIdx = this.linked().findIndex((l) => l.name === name);
+    const own = path.join(this.root, name);
+    const isOwn = existsSync(path.join(own, CHART_FILE));
+    if (!isOwn && linkIdx < 0) throw new HttpError(404, `No project "${name}"`);
+    const dir = isOwn ? own : this.linked()[linkIdx].dir;
+    const open = this.open.get(name);
+    if (open?.drawing) throw new HttpError(409, "Its chart is still being drawn. Wait for it to finish, then remove it.");
+
+    let message: string;
+    if (opts.deleteFolder) {
+      if (existsSync(dir)) {
+        const real = realOrNull(dir) ?? dir;
+        const guarded = [realOrNull(this.root) ?? this.root, ...(this.options.protectedDirs ?? []).map((d) => realOrNull(d) ?? d)];
+        if (path.dirname(real) === real || real === (realOrNull(homeDir()) ?? homeDir()) || guarded.some((g) => within(g, real))) {
+          throw new HttpError(400, "That folder can't be deleted from here.");
+        }
+        await rm(real, { recursive: true, force: true });
+      }
+      message = `Deleted "${name}" and its folder ${displayPath(dir)}.`;
+    } else if (isOwn) {
+      const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
+      const trash = path.join(this.root, ".removed");
+      await mkdir(trash, { recursive: true });
+      const dest = path.join(trash, `${name}-${stamp}`);
+      await rename(own, dest);
+      message = `Removed "${name}" from the list. Its folder was moved to ${displayPath(dest)}; move it back into ${displayPath(this.root)} to restore it.`;
+    } else {
+      message = `Removed "${name}" from the list. Its folder ${displayPath(dir)} is unchanged.`;
+    }
+    if (linkIdx >= 0) {
+      this.linked().splice(linkIdx, 1);
+      this.saveLinks();
+    }
+    open?.close();
     this.open.delete(name);
-    return { ok: true };
+    this.jobs.delete(name);
+    return { ok: true, message };
   }
 
   /** The project name a folder already has in the app, if any. */

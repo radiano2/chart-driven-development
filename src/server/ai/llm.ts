@@ -10,6 +10,7 @@ import type {
   ProjectChart,
   Recommendation,
   RecommendationOption,
+  RunChatMessage,
   RunTrace,
   Stack,
   StackProposal,
@@ -388,11 +389,38 @@ ${JSON.stringify({ nodes: c.nodes.map(({ children, ...n }) => n), edges: c.edges
 
 Invent a small, abstract but realistic test scenario and trace sample data through this level, following the edges in call order.
 Each step is one bubble receiving data. "data" is a compact example value (max 80 chars) of what arrives at that bubble.
-Return: { "scenario": "one sentence", "steps": [ {"nodeId": "id of a bubble or edge endpoint at this level", "edgeId": "id of the edge the data came along (omit for the first step)", "data": "...", "note": "what the bubble does with it"} ] }
+The user watches the data move through the chart while a chat explains it, step by step, to someone who doesn't code.
+Write "intro", each step's "explain" and "summary" for that person: plain everyday words, no jargon (say "the list of todos", not "Todo[]";
+"saves it to a file", not "persists to storage"), short friendly sentences, and say WHY each step happens, not only what.
+Return: { "scenario": "one sentence", "intro": "2 or 3 sentences: what this part of the app does and what we're about to follow",
+"steps": [ {"nodeId": "id of a bubble or edge endpoint at this level", "edgeId": "id of the edge the data came along (omit for the first step)", "data": "...", "note": "what the bubble does with it, technical, one line", "explain": "1 or 2 plain sentences"} ],
+"summary": "1 or 2 sentences: what happened overall" }
 Use 4 to 12 steps.`,
-      { maxTokens: 3000 },
+      { maxTokens: 5000 },
     )) as Record<string, unknown>;
     return normTrace(raw, c);
+  }
+
+  async explainRun(ctx: { chart: ProjectChart; level: Level; trace: RunTrace; history: RunChatMessage[]; question: string }): Promise<string> {
+    const c = getLevel(ctx.chart, ctx.level) ?? ctx.chart.root;
+    const raw = (await this.llm.json(
+      `${PREAMBLE}\nYou are explaining a test run of the app to someone who doesn't code. Use plain everyday words, no jargon, short friendly sentences.`,
+      `Project: "${ctx.chart.idea}". Chart level "${ctx.level}":
+${JSON.stringify({ nodes: c.nodes.map(({ children, ...n }) => ({ ...n, inner: children?.nodes.map((f) => f.name) })), edges: c.edges })}
+
+The run they watched: ${JSON.stringify(ctx.trace)}
+
+Conversation so far:
+${ctx.history.map((m) => `${m.role === "user" ? "Them" : "You"}: ${m.text}`).join("\n") || "(none)"}
+
+Their question: "${ctx.question}"
+Answer it in 1 to 4 short sentences, based on the chart and the run. If the chart doesn't tell, say so honestly.
+Return: { "answer": "..." }`,
+      { maxTokens: 1500 },
+    )) as Record<string, unknown>;
+    const answer = String(raw.answer ?? "").trim();
+    if (!answer) throw new Error("The AI didn't answer. Try asking again.");
+    return answer.slice(0, 3000);
   }
 
   async readReference(ctx: { chart: ProjectChart; style: StyleGuide | null; image: string; note: string }) {
@@ -481,8 +509,12 @@ export function normTrace(raw: Record<string, unknown>, c: Chart): RunTrace {
         edgeId: edgeId && edgeIds.has(edgeId) ? edgeId : undefined,
         data: String(o.data ?? ""),
         note: String(o.note ?? ""),
+        ...(o.explain ? { explain: String(o.explain).slice(0, 600) } : {}),
       };
     })
     .filter((s) => s.nodeId);
-  return { scenario: String(raw.scenario ?? "Sample run"), steps };
+  const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 800) : undefined);
+  const intro = text(raw.intro);
+  const summary = text(raw.summary);
+  return { scenario: String(raw.scenario ?? "Sample run"), ...(intro ? { intro } : {}), steps, ...(summary ? { summary } : {}) };
 }

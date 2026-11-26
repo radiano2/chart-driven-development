@@ -122,11 +122,23 @@ export interface RunStep {
   edgeId?: string;
   data: string;
   note: string;
+  /** What happens here, in plain words for someone who doesn't code (shown in the run chat). */
+  explain?: string;
 }
 
 export interface RunTrace {
   scenario: string;
+  /** Opening message of the run chat: what this part of the app does and what we'll follow, in plain words. */
+  intro?: string;
   steps: RunStep[];
+  /** Closing message: what happened overall. */
+  summary?: string;
+}
+
+/** One message of the conversation about a run (questions the user asks after or during it). */
+export interface RunChatMessage {
+  role: "user" | "assistant";
+  text: string;
 }
 
 export interface HistoryEntry {

@@ -195,9 +195,19 @@ export class MockAI implements AI {
     const edges = [...c.edges].sort((a, b) => a.order - b.order);
     const steps: RunTrace["steps"] = [];
     const first: Bubble | undefined = c.nodes.find((n) => n.id === edges[0]?.from) ?? c.nodes[0];
-    if (first) steps.push({ nodeId: first.id, data: sample(edges[0]?.data ?? first.inputs[0]?.type ?? ""), note: `${first.name} starts the flow.` });
-    for (const e of edges) steps.push({ nodeId: e.to, edgeId: e.id, data: sample(e.data), note: `Receives ${e.data || "data"}.` });
-    return { scenario: 'A user adds "Buy milk" to an empty list.', steps };
+    const name = (id: string) => c.nodes.find((n) => n.id === id)?.name ?? id.split("/").pop()!;
+    if (first) steps.push({ nodeId: first.id, data: sample(edges[0]?.data ?? first.inputs[0]?.type ?? ""), note: `${first.name} starts the flow.`, explain: `It all starts at ${first.name}: this is where the new todo "Buy milk" comes in.` });
+    for (const e of edges) steps.push({ nodeId: e.to, edgeId: e.id, data: sample(e.data), note: `Receives ${e.data || "data"}.`, explain: `${name(e.from)} hands it over to ${name(e.to)}, which takes the next step with it.` });
+    return {
+      scenario: 'A user adds "Buy milk" to an empty list.',
+      intro: "Let's follow one todo through the app: someone types \"Buy milk\" and presses Add. Watch where it goes.",
+      steps,
+      summary: '"Buy milk" went all the way through: it was checked, saved, and is now on the list.',
+    };
+  }
+
+  async explainRun(ctx: { trace: RunTrace; question: string }): Promise<string> {
+    return `(Mock AI) Good question. In this run, "${ctx.trace.scenario}" passed through ${ctx.trace.steps.length} steps. You asked: "${ctx.question}".`;
   }
 
   // ---------- design ----------

@@ -47,7 +47,13 @@ To keep your work safe, the app won't open a folder that:
 - is your home folder, a whole drive, or holds this app or its projects folder,
 - has more than 20,000 files.
 
-Opened folders are remembered in `projects/.linked-projects.json`. **Remove from list** under a project forgets it; the folder, its chart and its history stay as they are.
+Opened folders are remembered in `projects/.linked-projects.json`.
+
+**Remove…** under any project asks what to do:
+- **Remove from the list** (the default, loses nothing): a folder you opened is just forgotten; a project the app made is moved to `projects/.removed/` (move it back to restore it).
+- **Delete the folder from disk**: deletes the project's folder with its code, chart and version history, for good. You type the project's name to confirm. The app won't delete your home folder, a drive, or its own folders.
+
+Its running app and assistant are stopped first. `npm run cdd -- remove <project> [--delete]` does the same from a terminal.
 
 About **Find it for me**: it only reads. It lists folders under your home folder (or the folders in `CDD_SEARCH_ROOTS`, separated by `:` or `;` on Windows), up to 5 levels deep, skipping hidden folders, system and app folders (`Library`, `AppData`, …) and dependencies (`node_modules`, `vendor`, …), and doesn't follow symlinks or look inside a project once it finds one. It stops after about 6 seconds. For each project folder it reads only the `package.json` description or the first lines of the README. The paths and those short descriptions (up to 150 folders, keyword matches first) are sent to DeepSeek to pick the matches; no code is sent until you open a folder. Without an API key it matches by name instead.
 
@@ -60,11 +66,11 @@ From a terminal: `npm run cdd -- open ~/code/my-app`, `npm run cdd -- find "reci
 | Type an idea ("todo app") | The AI recommends a tech stack plus alternatives. You pick one. |
 | Pick a stack | The AI draws the module chart, then writes scaffolding and each module's code. Every step is a git commit in the generated project. |
 | Click a bubble | See its description, inputs, outputs, file and code. |
-| Double-click a module | Open its inner chart of functions. Dashed bubbles are functions in other modules; click one to jump there. |
+| Double-click a module | The view dives into the bubble and its inner chart of functions grows out of it (going back up pulls back out). Dashed bubbles are functions in other modules; click one to jump there. |
 | Select a bubble, type what should happen next | The AI first **recommends how to proceed** (extend / split / rewrite / rewire). Pick an option and it updates the chart and code right away. |
 | **＋ Bubble** | Draw a bubble by hand (name, description, optional inputs/outputs). It's a draft until you click **Write the code**. |
 | **Draw arrow from here** | Connect two bubbles by hand and name the data that flows. |
-| **▶ Run** | The AI invents abstract test data and the chart animates it flowing through the bubbles in call order. |
+| **▶ Run** | The AI invents abstract test data and the chart animates it flowing through the bubbles in call order. A chat beside it explains each step in plain words as it happens (with time to read; **Pause** holds it), and you can ask questions about the run at any point ("why does it go there?"). Click a step in the chat to select its bubble. |
 | **Undo** / **History** | Restore any earlier version (code and chart together). Restores are new commits, so they can be undone too. |
 | Edit code in your own editor | The app notices uncommitted changes and offers to read them and update the chart, or keep them without updating. |
 

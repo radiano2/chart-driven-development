@@ -14,6 +14,8 @@ const HELP = `Chart Driven Development, command line
   cdd open <folder> [--yes]          open a folder: a chart project, or any codebase (draws its chart)
   cdd find <description…>            look for a project folder on this computer (read-only)
   cdd forget <project>               remove an opened folder from the list (the folder stays as it is)
+  cdd remove <project> [--delete]    take a project off the list (app-made ones go to projects/.removed);
+                                     --delete deletes its folder for good (asks you to type the name)
   cdd chart <project> [module]       print the chart (or one module's inner chart)
   cdd ask <project> <message…>       ask the assistant once, then exit
   cdd chat <project>                 talk to the assistant (type "exit" to quit, "reset" to forget)
@@ -99,8 +101,24 @@ async function main(argv: string[]) {
   }
   if (cmd === "forget") {
     if (!name) throw new Error("Usage: cdd forget <project>");
-    ws.forget(name);
+    await ws.forget(name);
     return out(`Removed "${name}" from the list. Its folder is unchanged.`);
+  }
+  if (cmd === "remove") {
+    if (!name) throw new Error("Usage: cdd remove <project> [--delete]");
+    const deleteFolder = rest.includes("--delete");
+    if (deleteFolder) {
+      if (process.stdin.isTTY !== true) throw new Error("Deleting a folder needs an interactive terminal (type the project's name to confirm).");
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      const typed = await rl.question(`This deletes the folder of "${name}" (code, chart and history) for good. Type ${name} to confirm: `).finally(() => rl.close());
+      if (typed.trim() !== name) return out("Nothing deleted.");
+    }
+    try {
+      stopApp(ws.get(name).dir);
+    } catch {
+      /* folder already gone */
+    }
+    return out((await ws.remove(name, { deleteFolder })).message);
   }
   if (!name) throw new Error(`Usage: cdd ${cmd} <project>`);
   const project = ws.get(name);

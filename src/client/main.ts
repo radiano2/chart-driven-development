@@ -1,5 +1,5 @@
 import { getLevel } from "../shared/chart.ts";
-import type { Bubble, DesignState, FindResult, FolderInspection, FolderListing, Level, Mockup, Port, ProjectChart, ProjectSummary, Recommendation, RunTrace, ServerEvent, Stack } from "../shared/types.ts";
+import type { Bubble, DesignState, FindResult, FolderInspection, FolderListing, Level, Mockup, Port, ProjectChart, ProjectSummary, Recommendation, RunChatMessage, RunTrace, ServerEvent, Stack } from "../shared/types.ts";
 import { api, type ChangeResult } from "./api.ts";
 import { ChartView } from "./chart-view.ts";
 
@@ -33,7 +33,7 @@ interface State {
   lastResult: { bubbleId: string | null; text: string; files: string[] } | null;
   code: { path: string; content: string } | null;
   drawing: boolean;
-  run: { trace: RunTrace; current: number } | null;
+  run: RunState | null;
   history: boolean;
   assistant: boolean;
   outside: string[];
@@ -70,6 +70,21 @@ const state: State = {
 
 let events: EventSource | null = null;
 
+/** One message in the run chat, in the order things happened. */
+type RunItem = { kind: "intro" } | { kind: "step"; i: number } | { kind: "summary" } | { kind: "q"; text: string } | { kind: "a"; text: string; failed?: boolean };
+interface RunState {
+  trace: RunTrace;
+  level: Level;
+  /** The step being shown; steps.length once the run is over. */
+  current: number;
+  items: RunItem[];
+  playing: boolean;
+  paused: boolean;
+  /** Waiting for an answer to a question. */
+  asking: boolean;
+  draft: string;
+}
+
 type ChatItem =
   | { kind: "user"; text: string }
   | { kind: "reply"; text: string; changed?: string[] }
@@ -103,7 +118,7 @@ const view = new ChartView($("chart") as unknown as SVGSVGElement, {
     select(id);
   },
   onOpen(id) {
-    openLevel(id);
+    void openLevel(id);
   },
   onConnect(from, to) {
     void connect(from, to);
@@ -111,11 +126,7 @@ const view = new ChartView($("chart") as unknown as SVGSVGElement, {
   ghostLabel,
   onGhost(ref) {
     const mod = ref.split("/")[0];
-    if (state.chart?.root.nodes.some((n) => n.id === mod)) {
-      openLevel(mod);
-      const fn = ref.split("/")[1];
-      if (fn) select(fn);
-    }
+    if (state.chart?.root.nodes.some((n) => n.id === mod)) void openLevel(mod, ref.split("/")[1]);
   },
 });
 
@@ -189,21 +200,78 @@ function projectCard(p: ProjectSummary) {
     p.dir && h("code", { class: "small muted path" }, p.dir),
     !p.hasChart && !p.missing && h("span", { class: "badge" }, "not generated yet"),
   );
-  if (!p.linked) return card;
-  const forget = h(
-    "button",
-    {
-      class: "link small forget",
-      title: "Remove it from this list. The folder, its code, chart and history stay as they are.",
-      onclick: () =>
-        void guard("Removing from the list…", async () => {
-          await api.forget(p.name);
-          await goHome();
-        }),
-    },
-    "Remove from list",
+  const remove = h("button", { class: "link small forget", title: "Remove this project from the list, or delete it", onclick: () => removeDialog(p) }, "Remove…");
+  return h("div", { class: "project-item" }, card, remove);
+}
+
+/** Ask how to remove a project. Taking it off the list is the default and loses nothing; deleting needs the name typed. */
+function removeDialog(p: ProjectSummary) {
+  const keepText = p.linked
+    ? `Its folder ${p.dir ?? ""} stays exactly as it is. You can open it again any time.`
+    : "Its folder is moved to projects/.removed, so nothing is lost. Move it back to restore it.";
+  let mode: "list" | "delete" = "list";
+  const typed = h("input", { placeholder: p.name, autocomplete: "off", spellcheck: "false", "aria-label": "Type the project's name to confirm" }) as HTMLInputElement;
+  const confirmRow = h("label", { class: "confirm-name", hidden: true }, `Type ${p.name} to confirm`, typed);
+  const go = h("button", { class: "primary" }, "Remove from list") as HTMLButtonElement;
+  const update = () => {
+    confirmRow.hidden = mode !== "delete";
+    go.textContent = mode === "delete" ? "Delete for good" : "Remove from list";
+    go.className = mode === "delete" ? "primary danger" : "primary";
+    go.disabled = mode === "delete" && typed.value.trim() !== p.name;
+  };
+  const option = (value: "list" | "delete", title: string, text: string, warn = false) =>
+    h(
+      "label",
+      { class: `remove-option${warn ? " warn" : ""}` },
+      h("input", { type: "radio", name: "remove-mode", value, checked: value === "list", onchange: () => ((mode = value), update(), value === "delete" && typed.focus()) }),
+      h("span", {}, h("strong", {}, title), h("span", { class: "small muted" }, text)),
+    );
+  const close = () => overlay.remove();
+  const overlay = h(
+    "div",
+    { class: "modal-overlay", onclick: (e: Event) => e.target === overlay && close() },
+    h(
+      "div",
+      { class: "modal card", role: "dialog", "aria-modal": "true", "aria-label": `Remove ${p.name}` },
+      h("h2", {}, `Remove ${p.name}?`),
+      option("list", "Remove from the list", keepText),
+      p.missing
+        ? null
+        : option(
+            "delete",
+            "Delete the folder from disk",
+            `Deletes ${p.linked ? p.dir : "the project's folder"} with all its code, chart and version history. This can't be undone.`,
+            true,
+          ),
+      confirmRow,
+      h(
+        "div",
+        { class: "actions" },
+        go,
+        h("button", { onclick: close }, "Cancel"),
+      ),
+    ),
   );
-  return h("div", { class: "project-item" }, card, forget);
+  typed.addEventListener("input", update);
+  go.addEventListener("click", () => {
+    if (go.disabled) return;
+    go.disabled = true;
+    api
+      .remove(p.name, mode === "delete", typed.value.trim())
+      .then((r) => {
+        close();
+        toast(r.message);
+        void goHome();
+      })
+      .catch((e) => {
+        go.disabled = false;
+        toast((e as Error).message, "error");
+      });
+  });
+  overlay.addEventListener("keydown", (e) => e.key === "Escape" && close());
+  document.body.append(overlay);
+  update();
+  (overlay.querySelector("input[type=radio]") as HTMLInputElement | null)?.focus();
 }
 
 function subscribe(name: string) {
@@ -321,12 +389,29 @@ function enterWorkspace() {
   renderBanner();
 }
 
-function openLevel(level: Level) {
-  view.stopRun();
-  state.level = level;
-  state.selected = null;
-  resetPanelState();
-  renderChart();
+/** A level change in progress: ignore other clicks until its animation is done. */
+let moving = false;
+
+/** Go to a level, zooming into the module's bubble (or pulling back out of it) on the way. */
+async function openLevel(level: Level, focus?: string) {
+  if (moving || !state.chart || level === state.level) {
+    if (focus && level === state.level) select(focus);
+    return;
+  }
+  const from = state.level;
+  moving = true;
+  try {
+    view.stopRun();
+    if (from === "root") await view.zoomInto(level);
+    else await view.zoomAway();
+    state.level = level;
+    state.selected = null;
+    resetPanelState();
+    renderChart(false, false, level === "root" ? { how: "out", from } : { how: "in" });
+    if (focus) select(focus);
+  } finally {
+    moving = false;
+  }
 }
 
 function resetPanelState() {
@@ -358,7 +443,7 @@ function renderCrumbs() {
   const c = $("crumbs");
   c.replaceChildren();
   if (!state.project) return;
-  c.append(h("button", { onclick: () => state.chart && openLevel("root") }, state.project));
+  c.append(h("button", { onclick: () => void openLevel("root") }, state.project));
   if (state.level !== "root") {
     const mod = state.chart?.root.nodes.find((n) => n.id === state.level);
     c.append(h("span", { class: "sep" }, "›"), h("span", { class: "current" }, mod?.name ?? state.level));
@@ -375,14 +460,14 @@ function currentBubble(): Bubble | undefined {
   return currentChart()?.nodes.find((n) => n.id === state.selected);
 }
 
-function renderChart(keepView = false, animate = false) {
+function renderChart(keepView = false, animate = false, enter?: { how: "in" | "out"; from?: string }) {
   const chart = currentChart();
   if (!chart) {
     state.level = "root";
     return renderChart();
   }
   // While the chart is being drawn, keep the whole (growing) level in view.
-  view.render(chart, { keepView, animate, key: `${state.project}/${state.level}`, glide: animate && state.drawingChart });
+  view.render(chart, { keepView, animate, key: `${state.project}/${state.level}`, glide: animate && state.drawingChart, enter });
   const empty = $("empty-level");
   if (state.drawingChart && !chart.nodes.length) {
     empty.replaceChildren(h("span", { class: "drawing-note" }, h("span", { class: "spinner" }), state.level === "root" ? "Reading your code. Modules appear here as they're found." : "This module's functions appear here as soon as they're drawn."));
@@ -420,9 +505,19 @@ function portsList(title: string, ports: Port[]) {
 
 function renderPanel() {
   const panel = $("panel");
+  // The run chat re-renders on every step: keep the cursor in its question box.
+  const typing = document.activeElement instanceof HTMLTextAreaElement && document.activeElement.classList.contains("run-input");
   panel.replaceChildren();
   if (!state.chart) return;
-  if (state.run) return panel.append(runPanel(state.run));
+  if (state.run) {
+    panel.append(runPanel(state.run));
+    const ta = panel.querySelector<HTMLTextAreaElement>(".run-input");
+    if (typing && ta && !ta.disabled) {
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
+    return;
+  }
   if (state.assistant) return panel.append(assistantPanel());
   if (state.design) return panel.append(designPanel());
   if (state.history) {
@@ -518,7 +613,7 @@ function bubblePanel(b: Bubble) {
   }
 
   const actions = h("div", { class: "actions" });
-  if (b.kind === "module") actions.append(h("button", { onclick: () => openLevel(b.id) }, "Open module →"));
+  if (b.kind === "module") actions.append(h("button", { onclick: () => void openLevel(b.id) }, "Open module →"));
   actions.append(
     h(
       "button",
@@ -657,51 +752,138 @@ function drawPanel() {
   return form;
 }
 
-function runPanel(run: { trace: RunTrace; current: number }) {
-  const wrap = h("div", { class: "panel-body" });
+/** The run chat: the AI explains, step by step and in plain words, how the test data moves; you can ask about it. */
+function runPanel(run: RunState) {
+  const name = state.project!;
+  const t = run.trace;
+  const wrap = h("div", { class: "panel-body assistant run-chat" });
   wrap.append(
-    h("p", { class: "eyebrow" }, "Run · invented test data"),
-    h("h2", {}, run.trace.scenario),
-    h(
-      "ol",
-      { class: "run-steps" },
-      ...run.trace.steps.map((s, i) => {
-        const label = ghostLabel(s.nodeId);
-        const n = currentChart()?.nodes.find((x) => x.id === s.nodeId);
-        return h("li", { class: i === run.current ? "current" : i < run.current ? "done" : "" }, h("strong", {}, n?.name ?? label), h("code", {}, s.data), h("span", { class: "small muted" }, s.note));
-      }),
-    ),
     h(
       "div",
-      { class: "actions" },
-      h("button", { onclick: () => void playRun(run.trace) }, "Replay"),
-      h(
-        "button",
-        {
-          onclick: () => {
-            view.stopRun();
-            state.run = null;
-            renderPanel();
+      { class: "assistant-head" },
+      h("div", {}, h("p", { class: "eyebrow" }, "Run · invented test data"), h("h2", {}, t.scenario)),
+      h("button", { onclick: closeRun }, "Close"),
+    ),
+  );
+  const log = h("div", { class: "chat-log" });
+  for (const it of run.items) {
+    if (it.kind === "intro") log.append(h("div", { class: "msg reply run-msg" }, t.intro || t.scenario));
+    else if (it.kind === "summary") log.append(h("div", { class: "msg reply run-msg summary" }, h("strong", {}, "That's it. "), t.summary || "The data made it all the way through."));
+    else if (it.kind === "q") log.append(h("div", { class: "msg user" }, it.text));
+    else if (it.kind === "a") log.append(h("div", { class: `msg reply run-msg${it.failed ? " failed" : ""}` }, it.text));
+    else {
+      const st = t.steps[it.i];
+      const label = currentChart()?.nodes.find((x) => x.id === st.nodeId)?.name ?? ghostLabel(st.nodeId);
+      log.append(
+        h(
+          "button",
+          {
+            class: `msg reply run-msg step${it.i === run.current && run.playing ? " current" : ""}`,
+            title: "Show this bubble",
+            onclick: () => {
+              if (currentChart()?.nodes.some((x) => x.id === st.nodeId)) select(st.nodeId);
+            },
           },
-        },
-        "Close",
+          h("span", { class: "run-step-head" }, h("span", { class: "step-no" }, String(it.i + 1)), h("strong", {}, label)),
+          st.data ? h("code", { class: "run-data" }, st.data) : null,
+          h("span", {}, st.explain || st.note),
+        ),
+      );
+    }
+  }
+  if (run.asking) log.append(h("div", { class: "activity working" }, h("span", { class: "spinner" }), " Thinking…"));
+  wrap.append(log);
+
+  const ta = h("textarea", { rows: 2, placeholder: run.playing ? "Ask about what you're seeing…" : "Ask about this run, e.g. \"why does it go there?\"", disabled: run.asking, class: "run-input" }) as HTMLTextAreaElement;
+  ta.value = run.draft;
+  ta.addEventListener("input", () => (run.draft = ta.value));
+  const send = () => {
+    const question = ta.value.trim();
+    if (!question || run.asking) return;
+    // Pause while the answer comes, so the explanation doesn't run away from it.
+    if (run.playing) run.paused = view.paused = true;
+    const history = run.items.flatMap((x): RunChatMessage[] => (x.kind === "q" ? [{ role: "user", text: x.text }] : x.kind === "a" && !x.failed ? [{ role: "assistant", text: x.text }] : []));
+    run.items.push({ kind: "q", text: question });
+    run.draft = "";
+    run.asking = true;
+    renderPanel();
+    api
+      .runAsk(name, run.level, t, history, question)
+      .then((r) => run.items.push({ kind: "a", text: r.answer }))
+      .catch((e) => run.items.push({ kind: "a", text: `Couldn't answer: ${(e as Error).message}`, failed: true }))
+      .finally(() => {
+        run.asking = false;
+        if (state.run === run) renderPanel();
+      });
+  };
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+  wrap.append(
+    h(
+      "div",
+      { class: "chat-input" },
+      ta,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { class: "primary", onclick: send, disabled: run.asking }, "Ask"),
+        run.playing
+          ? h(
+              "button",
+              {
+                onclick: () => {
+                  run.paused = view.paused = !run.paused;
+                  renderPanel();
+                },
+              },
+              run.paused ? "▶ Continue" : "❚❚ Pause",
+            )
+          : h("button", { onclick: () => void playRun(t, run.level) }, "↻ Replay"),
       ),
     ),
   );
-  requestAnimationFrame(() => wrap.querySelector(".current")?.scrollIntoView({ block: "nearest" }));
+  requestAnimationFrame(() => (log.scrollTop = log.scrollHeight));
   return wrap;
 }
 
-async function playRun(trace: RunTrace) {
-  state.run = { trace, current: 0 };
+function closeRun() {
+  view.stopRun();
+  view.paused = false;
+  state.run = null;
   renderPanel();
-  await view.play(trace.steps, (i) => {
-    if (state.run?.trace !== trace) return;
-    state.run.current = i;
-    renderPanel();
-  });
-  if (state.run?.trace === trace) {
-    state.run.current = trace.steps.length;
+}
+
+/** Time to read a step's explanation before the data moves on. */
+const dwellFor = (text: string | undefined) => (text ? Math.min(5000, 1200 + text.length * 30) : 900);
+
+async function playRun(trace: RunTrace, level: Level = state.level) {
+  const run: RunState = { trace, level, current: 0, items: [{ kind: "intro" }], playing: true, paused: false, asking: false, draft: state.run?.draft ?? "" };
+  state.run = run;
+  view.paused = false;
+  renderPanel();
+  // Let the intro be read before the first step.
+  await view.wait(dwellFor(trace.intro), () => state.run === run);
+  if (state.run !== run) return;
+  await view.play(
+    trace.steps,
+    (i) => {
+      if (state.run !== run) return;
+      run.current = i;
+      run.items.push({ kind: "step", i });
+      renderPanel();
+    },
+    1,
+    (i) => dwellFor(trace.steps[i]?.explain),
+  );
+  if (state.run === run) {
+    run.current = trace.steps.length;
+    run.playing = false;
+    run.paused = view.paused = false;
+    run.items.push({ kind: "summary" });
     renderPanel();
   }
 }
@@ -1450,7 +1632,7 @@ document.addEventListener("paste", (e) => {
 // ---------- toolbar ----------
 
 $("home-link").addEventListener("click", () => void goHome());
-$("btn-up").addEventListener("click", () => openLevel("root"));
+$("btn-up").addEventListener("click", () => void openLevel("root"));
 $("btn-draw").addEventListener("click", () => {
   view.stopRun();
   state.run = null;

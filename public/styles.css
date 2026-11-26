@@ -327,3 +327,41 @@ input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--acc
   .chart > g.smooth, .node.glide { transition: none; }
   .node.appear .node-inner, .node.appear .body, .node.filled .node-inner, .edge.appear .edge-path, .edge.appear .edge-label, .edge.reflow { animation: none; }
 }
+
+/* ---------- opening a module: dive into the bubble, the inner chart grows out of it ---------- */
+.chart > g.zoom-in { transition: transform .42s cubic-bezier(.55, 0, .8, .4), opacity .42s ease-in; }
+.chart > g.zoom-out { transition: transform .3s cubic-bezier(.4, 0, .9, .5), opacity .3s ease-in; }
+.chart > g.settle { transition: transform .6s cubic-bezier(.15, .85, .25, 1), opacity .35s ease-out; }
+.chart.zoom-focus .node:not(.zoom-target), .chart.zoom-focus .edge { opacity: 0; transition: opacity .25s ease-out; }
+.chart.zoom-focus .zoom-target text { opacity: 0; transition: opacity .2s; }
+.chart.zoom-focus .zoom-target .body { fill: var(--surface); transition: fill .42s; }
+
+/* ---------- run chat ---------- */
+.run-chat .chat-log { gap: 10px; }
+.run-msg { animation: msg-in .35s ease-out both; }
+.run-msg.step { display: grid; gap: 4px; text-align: left; border: 1px solid transparent; font: inherit; color: inherit; cursor: pointer; white-space: normal; }
+.run-msg.step:hover { border-color: var(--teal); }
+.run-msg.step.current { border-color: var(--teal); box-shadow: 0 0 0 2px var(--teal-soft); }
+.run-step-head { display: flex; align-items: center; gap: 8px; }
+.step-no { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--teal); color: #fff; font-size: 11px; font-weight: 700; }
+.run-data { justify-self: start; background: var(--teal-soft); border-radius: 4px; padding: 1px 6px; overflow-wrap: anywhere; }
+.run-msg.summary { border-left: 3px solid var(--teal); }
+.run-msg.failed { color: var(--danger); }
+@keyframes msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ---------- remove dialog ---------- */
+.modal-overlay { position: fixed; inset: 0; z-index: 50; background: rgb(15 18 30 / 45%); display: grid; place-items: center; padding: 16px; animation: fade-in .15s ease-out; }
+.modal { width: min(480px, 100%); display: grid; gap: 12px; }
+.modal h2 { margin: 0; overflow-wrap: anywhere; }
+.remove-option { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; cursor: pointer; }
+.remove-option span { display: grid; gap: 2px; overflow-wrap: anywhere; }
+.remove-option:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.remove-option.warn:has(input:checked) { border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger); }
+.remove-option input { margin-top: 3px; width: auto; flex: none; }
+.confirm-name { display: grid; gap: 6px; font-size: 13px; }
+.modal .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+button.primary.danger { background: var(--danger); border-color: var(--danger); }
+@media (prefers-reduced-motion: reduce) {
+  .chart > g.zoom-in, .chart > g.zoom-out, .chart > g.settle { transition: none; }
+  .run-msg, .modal-overlay { animation: none; }
+}

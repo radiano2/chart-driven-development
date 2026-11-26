@@ -143,6 +143,101 @@ export class ChartView {
     this.applyView();
   }
 
+  // ---------- opening and leaving modules ----------
+
+  private reducedMotion() {
+    return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  }
+
+  private fitView(): { x: number; y: number; k: number } | null {
+    const r = this.svg.getBoundingClientRect();
+    if (!this.bounds.w || !r.width) return null;
+    const pad = 40;
+    const k = Math.min(1.2, (r.width - pad * 2) / this.bounds.w, (r.height - pad * 2) / this.bounds.h);
+    return { k, x: (r.width - this.bounds.w * k) / 2, y: (r.height - this.bounds.h * k) / 2 };
+  }
+
+  /** The view that makes bubble `id` fill most of the screen. */
+  private viewOnto(id: string, fill = 0.85): { x: number; y: number; k: number } | null {
+    const b = this.nodeBoxes.get(id);
+    const r = this.svg.getBoundingClientRect();
+    if (!b || !r.width) return null;
+    const k = Math.min((r.width * fill) / b.w, (r.height * fill) / b.h);
+    return { k, x: r.width / 2 - (b.x + b.w / 2) * k, y: r.height / 2 - (b.y + b.h / 2) * k };
+  }
+
+  private async transition(cls: string, to: { x: number; y: number; k: number }, opacity: number, ms: number) {
+    this.root.classList.remove("smooth", "zoom-in", "zoom-out", "settle");
+    void this.root.getBoundingClientRect(); // start from the current state
+    this.root.classList.add(cls);
+    this.view = to;
+    this.applyView();
+    this.root.style.opacity = String(opacity);
+    await new Promise((r) => setTimeout(r, ms));
+    this.root.classList.remove(cls);
+  }
+
+  /** Opening a module: dive into its bubble until it fills the screen while everything else fades away. */
+  async zoomInto(id: string): Promise<void> {
+    const to = this.viewOnto(id, 1.6);
+    if (!to || this.reducedMotion()) return;
+    this.svg.classList.add("zoom-focus");
+    this.nodeEls.get(id)?.classList.add("zoom-target");
+    await this.transition("zoom-in", to, 0, 420);
+    this.svg.classList.remove("zoom-focus");
+  }
+
+  /** Leaving a module: its chart shrinks back into the distance. */
+  async zoomAway(): Promise<void> {
+    const f = this.fitView();
+    if (!f || this.reducedMotion()) return;
+    const k = f.k * 0.3;
+    const r = this.svg.getBoundingClientRect();
+    await this.transition("zoom-out", { k, x: r.width / 2 - (this.bounds.w * k) / 2, y: r.height / 2 - (this.bounds.h * k) / 2 }, 0, 300);
+  }
+
+  /**
+   * After render: animate the new level in. "in" (a module's inner chart) grows out of the middle of the screen,
+   * with its bubbles popping in; "out" (back at the modules) starts zoomed into the module we came from and pulls back.
+   */
+  private enter(how: "in" | "out", from?: string) {
+    const end = this.fitView();
+    if (!end) return this.fit();
+    if (this.reducedMotion()) {
+      this.view = end;
+      this.root.style.opacity = "1";
+      return this.applyView();
+    }
+    const r = this.svg.getBoundingClientRect();
+    let start: { x: number; y: number; k: number };
+    if (how === "in") {
+      const k = end.k * 0.35;
+      start = { k, x: r.width / 2 - (this.bounds.w * k) / 2, y: r.height / 2 - (this.bounds.h * k) / 2 };
+      const nodes = [...this.nodeEls.values()];
+      nodes.forEach((g, i) => {
+        g.classList.add("appear");
+        g.style.setProperty("--delay", `${120 + i * 45}ms`);
+      });
+      // Then the arrows draw themselves between them.
+      [...this.edgePaths.values()].forEach((path, i) => {
+        const grp = path.parentElement as unknown as SVGGElement;
+        grp.classList.add("appear");
+        path.addEventListener("animationend", () => grp.classList.remove("appear"), { once: true });
+        grp.style.setProperty("--len", String(Math.ceil(path.getTotalLength()) + 2));
+        grp.style.setProperty("--delay", `${300 + nodes.length * 45 + i * 70}ms`);
+      });
+    } else {
+      start = (from && this.viewOnto(from, 1.6)) || { ...end, k: end.k * 2 };
+      if (from) this.nodeEls.get(from)?.classList.add("filled");
+    }
+    this.root.classList.remove("smooth", "zoom-in", "zoom-out", "settle");
+    this.view = start;
+    this.applyView();
+    this.root.style.opacity = how === "in" ? "0" : "0.2";
+    void this.root.getBoundingClientRect();
+    void this.transition("settle", end, 1, 600).then(() => (this.touched = false));
+  }
+
   zoomBy(f: number) {
     this.touched = true;
     const r = this.svg.getBoundingClientRect();
@@ -158,7 +253,7 @@ export class ChartView {
    * pop in one after another, then new arrows draw themselves; bubbles that moved glide to their new place, and a
    * module that just got functions inside pulses. With `glide`, the view refits smoothly to the new size.
    */
-  render(chart: Chart, opts: { keepView?: boolean; animate?: boolean; key?: string; glide?: boolean } = {}) {
+  render(chart: Chart, opts: { keepView?: boolean; animate?: boolean; key?: string; glide?: boolean; enter?: { how: "in" | "out"; from?: string } } = {}) {
     const prev = opts.animate && this.last && this.last.key === (opts.key ?? "") ? this.last : null;
     this.stopRun();
     this.nodesG.replaceChildren();
@@ -206,10 +301,15 @@ export class ChartView {
     };
 
     this.setSelected(this.selected && this.nodeEls.has(this.selected) ? this.selected : null);
-    if (opts.glide) {
+    if (opts.enter) {
+      // Hide it until the first frame of the entrance, so the fitted chart doesn't flash first.
+      this.root.style.opacity = "0";
+      const enter = opts.enter;
+      requestAnimationFrame(() => this.enter(enter.how, enter.from));
+    } else if (opts.glide) {
       if (!this.touched) requestAnimationFrame(() => this.smoothly(() => this.fit()));
-    }
-    else if (!opts.keepView) requestAnimationFrame(() => this.fit());
+    } else if (!opts.keepView) requestAnimationFrame(() => this.fit());
+    if (!opts.enter) this.root.style.opacity = "1";
   }
 
   private animateChanges(chart: Chart, prev: NonNullable<ChartView["last"]>) {
@@ -337,23 +437,41 @@ export class ChartView {
 
   // ---------- run animation ----------
 
+  /** While true, the run animation holds before its next step. */
+  paused = false;
+
+  /** Wait `ms` of unpaused time; resolves early if `alive` turns false. */
+  async wait(ms: number, alive: () => boolean = () => true): Promise<void> {
+    let left = ms;
+    while (left > 0 && alive()) {
+      const step = Math.min(100, left);
+      await new Promise((r) => setTimeout(r, step));
+      if (!this.paused) left -= step;
+    }
+  }
+
   stopRun() {
     this.runToken++;
+    this.paused = false;
     this.fxG.replaceChildren();
     for (const g of this.nodeEls.values()) g.classList.remove("active", "visited");
     for (const p of this.edgePaths.values()) p.classList.remove("active");
   }
 
   /** Animate sample data flowing through the chart. Resolves when finished or stopped. */
-  async play(steps: RunStep[], onStep: (i: number) => void, speed = 1): Promise<void> {
+  async play(steps: RunStep[], onStep: (i: number) => void, speed = 1, dwell: (i: number) => number = () => 900): Promise<void> {
+    const wasPaused = this.paused;
     this.stopRun();
+    this.paused = wasPaused;
     const token = this.runToken;
     const alive = () => token === this.runToken;
-    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms / speed));
+    const wait = (ms: number) => this.wait(ms / speed, alive);
     let prev: string | null = null;
 
     for (let i = 0; i < steps.length && alive(); i++) {
       const s = steps[i];
+      while (this.paused && alive()) await new Promise((r) => setTimeout(r, 100));
+      if (!alive()) return;
       onStep(i);
       let path = s.edgeId ? this.edgePaths.get(s.edgeId) : undefined;
       if (!path && prev) {
@@ -373,7 +491,7 @@ export class ChartView {
         this.tag(s.nodeId, s.data);
       }
       prev = s.nodeId;
-      await wait(900);
+      await wait(dwell(i));
     }
     if (alive()) {
       for (const g of this.nodeEls.values()) g.classList.remove("active");

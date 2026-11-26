@@ -9,6 +9,7 @@ import type {
   ProjectChart,
   Recommendation,
   RecommendationOption,
+  RunChatMessage,
   RunTrace,
   Stack,
   StackProposal,
@@ -121,8 +122,10 @@ export interface AI {
   chartModule(ctx: ModuleContext): Promise<Chart>;
   /** Pick the folders that best match what the user described. Paths must come from `candidates`. */
   pickProjects(ctx: { request: string; candidates: FolderCandidate[] }): Promise<{ path: string; reason: string }[]>;
-  /** Invent abstract sample data and trace it through one chart level. */
+  /** Invent abstract sample data and trace it through one chart level, explained in plain words. */
   simulateRun(chart: ProjectChart, level: Level): Promise<RunTrace>;
+  /** Answer a question about a run, in plain words. */
+  explainRun(ctx: { chart: ProjectChart; level: Level; trace: RunTrace; history: RunChatMessage[]; question: string }): Promise<string>;
 
   // ---------- design (see skills/cdd-design.md) ----------
   /** Look at a reference image and update the style guide from it. */
