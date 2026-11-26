@@ -49,7 +49,7 @@ Edit this file to change how the AI designs.
 
 ## Answer format for a mockup request
 
-Return one JSON object:
+Return one JSON object (the assistant passes the same fields to `create_mockup` instead of replying with JSON):
 
 ```json
 {

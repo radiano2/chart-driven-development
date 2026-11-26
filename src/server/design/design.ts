@@ -25,6 +25,10 @@ const IMAGE_TYPES: Record<string, { ext: string; magic: (b: Buffer) => boolean }
 };
 const MIME_BY_EXT: Record<string, string> = { png: "image/png", jpg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
 
+/** Files edited by hand could hold anything: fall back to empty instead of breaking the UI. */
+const arr = <T>(v: T[]): T[] => (Array.isArray(v) ? v.filter((x) => x && typeof x === "object") : []);
+const obj = <T extends object>(v: T): T => (v && typeof v === "object" && !Array.isArray(v) ? v : ({} as T));
+
 const newId = () => `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
 const now = () => new Date().toISOString();
 
@@ -92,10 +96,10 @@ export class Design {
     const settings = await this.readJson<{ appUrl?: string }>("settings.json", {});
     return {
       style: normStyle(await this.readJson("style.json", null)),
-      references: await this.readJson<DesignReference[]>("references.json", []),
-      mockups: await this.readJson<Mockup[]>("mockups.json", []),
-      screenshots: await this.readJson<Record<string, Screenshot>>("screens/screens.json", {}),
-      appUrl: settings.appUrl ?? null,
+      references: arr(await this.readJson<DesignReference[]>("references.json", [])),
+      mockups: arr(await this.readJson<Mockup[]>("mockups.json", [])),
+      screenshots: obj(await this.readJson<Record<string, Screenshot>>("screens/screens.json", {})),
+      appUrl: typeof settings?.appUrl === "string" ? settings.appUrl : null,
     };
   }
 

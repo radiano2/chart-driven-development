@@ -85,7 +85,7 @@ ${uiBubbles(ctx.chart)}
 
 Current style guide: ${ctx.style ? JSON.stringify(ctx.style) : "(none yet: propose one)"}
 
-Reference images the user gave${ctx.referenceImages.length ? " (the first ones are attached)" : ""}:
+Reference images the user gave${ctx.referenceImages.length ? " (the latest ones are attached)" : ""}:
 ${ctx.references.map((r) => `- ${r.note ? `"${r.note}": ` : ""}${r.description}`).join("\n") || "(none)"}
 
 UI source files:
