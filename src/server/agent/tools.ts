@@ -218,7 +218,11 @@ export async function runTool(name: string, a: Args, ctx: ToolContext): Promise<
     }
     case "delete_file": {
       const rel = arg(a, "path");
-      await rm(safePath(p.dir, rel), { force: true });
+      const abs = safePath(p.dir, rel);
+      const s = await stat(abs).catch(() => null);
+      if (!s) throw new Error(`No such file: ${rel}`);
+      if (!s.isFile()) throw new Error(`${rel} is a folder; delete the files in it one by one`);
+      await rm(abs);
       ctx.changed.add(rel);
       return `Deleted ${rel}.`;
     }
