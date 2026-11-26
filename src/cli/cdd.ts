@@ -17,6 +17,8 @@ const HELP = `Chart Driven Development, command line
   cdd undo <project>                 go back one version
   cdd restore <project> <version>    restore a saved version
   cdd folder <project> [--open]      print (or open) the project folder
+  cdd settings                       show which DeepSeek key and model are used
+  cdd set-key                        save your DeepSeek API key (asks for it, so it stays out of shell history)
 
 Commands outside the safe list (install, test, build) ask before running.
 In a non-interactive shell they are refused.
@@ -38,6 +40,21 @@ async function main(argv: string[]) {
 
   const cfg = setup();
   const ws = cfg.ws;
+  if (cmd === "settings") {
+    const s = cfg.brain.settings.status();
+    out(`AI:     ${cfg.brain.label}\nKey:    ${s.hasKey ? `from ${s.keySource} (ending ${s.keyHint})` : "none"}\nModel:  ${s.model}\nStored: ${s.file}`);
+    return;
+  }
+  if (cmd === "set-key") {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    const key = (await rl.question("DeepSeek API key: ")).trim();
+    rl.close();
+    if (!key) throw new Error("No key entered");
+    cfg.brain.update({ deepseekApiKey: key });
+    const t = await cfg.brain.settings.test();
+    out(t.ok ? "Saved. The key works." : `Saved, but: ${t.message}`);
+    return;
+  }
   if (cmd === "projects") {
     const list = await ws.list();
     if (!list.length) return out(`No projects in ${cfg.workspace}.`);

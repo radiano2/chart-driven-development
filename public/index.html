@@ -17,10 +17,15 @@
     <div class="spacer"></div>
     <div class="status" id="status" hidden><span class="spinner"></span><span id="status-text"></span></div>
     <span class="ai-label" id="ai-label"></span>
+    <button id="btn-settings" class="settings-btn" title="Settings: DeepSeek API key">⚙ Settings</button>
   </header>
 
   <!-- Home: projects + new idea -->
   <main id="home" class="page">
+    <div id="key-banner" class="banner key-banner" hidden>
+      <span><strong>Add your DeepSeek API key</strong> to start building. It stays on this computer.</span>
+      <button class="primary" id="key-banner-btn">Open settings</button>
+    </div>
     <section class="new-project card">
       <h1>What do you want to build?</h1>
       <p class="muted">Describe an app in a sentence. The AI suggests a tech stack, draws the app as a flowchart, and writes real code into a project folder.</p>
@@ -35,6 +40,31 @@
     <section>
       <h2>Your projects</h2>
       <div id="project-list" class="project-list"></div>
+    </section>
+  </main>
+
+  <!-- Settings -->
+  <main id="settings-page" class="page" hidden>
+    <section class="card settings">
+      <h1>Settings</h1>
+      <p class="muted">The key is saved on this computer only (in <code id="settings-file"></code>), never in a project or in git, and the browser never sees it again after you save.</p>
+      <div id="settings-status" class="settings-status"></div>
+      <form id="settings-form">
+        <label>DeepSeek API key
+          <input id="set-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
+        </label>
+        <p class="small muted">Get one at platform.deepseek.com → API keys. Leave empty to keep the current key.</p>
+        <label>Model
+          <input id="set-model" autocomplete="off" spellcheck="false" placeholder="deepseek-chat">
+        </label>
+        <div class="actions">
+          <button class="primary" type="submit">Save</button>
+          <button type="button" id="set-test">Test connection</button>
+          <button type="button" id="set-done">Done</button>
+          <button type="button" id="set-remove" class="danger-link">Remove saved key</button>
+        </div>
+        <p id="settings-result" class="small" role="status"></p>
+      </form>
     </section>
   </main>
 

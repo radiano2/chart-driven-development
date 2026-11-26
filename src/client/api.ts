@@ -15,8 +15,8 @@ import type {
 async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
     method,
-    headers: body ? { "content-type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
+    headers: method === "GET" ? undefined : { "content-type": "application/json" },
+    body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as { error?: string }).error || `Request failed (${res.status})`);
@@ -24,6 +24,15 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
 }
 
 const P = (name: string) => `/api/projects/${encodeURIComponent(name)}`;
+
+export interface SettingsStatus {
+  mock: boolean;
+  hasKey: boolean;
+  keySource: "settings" | "env" | null;
+  keyHint: string | null;
+  model: string;
+  file: string;
+}
 
 export interface ChangeResult {
   chart: ProjectChart;
@@ -33,7 +42,10 @@ export interface ChangeResult {
 }
 
 export const api = {
-  info: () => call<{ ai: string; workspace: string }>("GET", "/api/info"),
+  info: () => call<{ ai: string; workspace: string; needsKey: boolean }>("GET", "/api/info"),
+  settings: () => call<SettingsStatus>("GET", "/api/settings"),
+  saveSettings: (patch: { deepseekApiKey?: string; deepseekModel?: string }) => call<SettingsStatus & { ai: string }>("PUT", "/api/settings", patch),
+  testKey: (deepseekApiKey?: string) => call<{ ok: boolean; message: string }>("POST", "/api/settings/test", { deepseekApiKey }),
   projects: () => call<ProjectSummary[]>("GET", "/api/projects"),
   create: (name: string, idea: string) => call<{ name: string; chart: ProjectChart }>("POST", "/api/projects", { name, idea }),
   open: (name: string) => call<{ name: string; dir: string; chart: ProjectChart; outside: string[] }>("GET", P(name)),

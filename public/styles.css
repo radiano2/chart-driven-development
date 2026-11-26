@@ -242,3 +242,14 @@ input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--acc
 .approval code { display: block; background: var(--surface); padding: 6px 8px; border-radius: 6px; overflow-wrap: anywhere; }
 .chat-input { display: grid; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; }
 .chat-input p { margin: 0; }
+
+/* ---------- settings ---------- */
+.settings-btn { border-color: transparent; background: none; color: var(--muted); }
+.settings form { display: grid; gap: 8px; margin-top: 12px; max-width: 520px; }
+.settings label { display: grid; gap: 4px; font-weight: 500; }
+.settings p { margin: 0; }
+.settings-status p { padding: 8px 12px; border-radius: 8px; margin-top: 8px; }
+.settings-status .ok { background: var(--teal-soft); }
+.settings-status .warn { background: var(--amber-soft); }
+.small.ok { color: var(--teal); }
+.key-banner { border-radius: var(--radius); margin-bottom: 20px; border: 1px solid var(--border); }

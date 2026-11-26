@@ -129,8 +129,8 @@ async function guard<T>(label: string, fn: () => Promise<T>): Promise<T | undefi
 
 // ---------- navigation ----------
 
-function show(page: "home" | "stack-page" | "workspace") {
-  for (const id of ["home", "stack-page", "workspace"]) $(id).hidden = id !== page;
+function show(page: "home" | "stack-page" | "workspace" | "settings-page") {
+  for (const id of ["home", "stack-page", "workspace", "settings-page"]) $(id).hidden = id !== page;
 }
 
 async function goHome() {
@@ -896,10 +896,95 @@ window.addEventListener("resize", () => !$("workspace").hidden && view.fit());
 
 // ---------- boot ----------
 
-api
-  .info()
-  .then((i) => ($("ai-label").textContent = `AI: ${i.ai}`))
-  .catch(() => undefined);
+// ---------- settings ----------
+
+function refreshInfo() {
+  return api
+    .info()
+    .then((i) => {
+      $("ai-label").textContent = `AI: ${i.ai}`;
+      $("key-banner").hidden = !i.needsKey;
+    })
+    .catch(() => undefined);
+}
+
+let beforeSettings: (() => void) | null = null;
+
+async function openSettings() {
+  const wasWorkspace = !$("workspace").hidden && state.project;
+  beforeSettings = wasWorkspace ? () => (show("workspace"), renderChart(true)) : () => void goHome();
+  show("settings-page");
+  $("settings-result").textContent = "";
+  ($("set-key") as HTMLInputElement).value = "";
+  try {
+    renderSettings(await api.settings());
+  } catch (e) {
+    $("settings-status").replaceChildren(h("p", { class: "error" }, (e as Error).message));
+  }
+  ($("set-key") as HTMLInputElement).focus();
+}
+
+function renderSettings(s: import("./api.ts").SettingsStatus) {
+  $("settings-file").textContent = s.file;
+  ($("set-model") as HTMLInputElement).value = s.model;
+  const line = s.mock
+    ? "The app is running in mock mode (CDD_AI=mock), so no key is used until you restart it normally."
+    : s.keySource === "settings"
+      ? `Using the key saved here (ending ${s.keyHint}).`
+      : s.keySource === "env"
+        ? `Using DEEPSEEK_API_KEY from .env / environment (ending ${s.keyHint}). A key saved here takes priority.`
+        : "No key yet.";
+  $("settings-status").replaceChildren(h("p", { class: s.hasKey || s.mock ? "ok" : "warn" }, line));
+  $("set-remove").hidden = s.keySource !== "settings";
+}
+
+function settingsResult(text: string, ok: boolean) {
+  const r = $("settings-result");
+  r.textContent = text;
+  r.className = `small ${ok ? "ok" : "error"}`;
+}
+
+$("btn-settings").addEventListener("click", () => void openSettings());
+$("key-banner-btn").addEventListener("click", () => void openSettings());
+$("settings-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const key = ($("set-key") as HTMLInputElement).value.trim();
+  const model = ($("set-model") as HTMLInputElement).value.trim();
+  void guard("Saving…", async () => {
+    const patch: { deepseekApiKey?: string; deepseekModel?: string } = { deepseekModel: model };
+    if (key) patch.deepseekApiKey = key;
+    const s = await api.saveSettings(patch);
+    ($("set-key") as HTMLInputElement).value = "";
+    renderSettings(s);
+    await refreshInfo();
+    settingsResult(key ? "Saved. Checking the key…" : "Saved.", true);
+    if (key) {
+      const t = await api.testKey();
+      settingsResult(t.ok ? "Saved, and the key works." : `Saved, but: ${t.message}`, t.ok);
+    }
+  });
+});
+$("set-done").addEventListener("click", () => beforeSettings?.());
+$("set-test").addEventListener("click", () => {
+  const key = ($("set-key") as HTMLInputElement).value.trim();
+  void guard("Testing…", async () => {
+    const t = await api.testKey(key || undefined);
+    settingsResult(t.message, t.ok);
+  });
+});
+$("set-remove").addEventListener("click", () => {
+  if (!confirm("Remove the DeepSeek key saved in the app?")) return;
+  void guard("Removing…", async () => {
+    renderSettings(await api.saveSettings({ deepseekApiKey: "" }));
+    await refreshInfo();
+    settingsResult("Removed.", true);
+  });
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("settings-page").hidden) beforeSettings?.();
+});
+
+void refreshInfo();
 const initial = new URLSearchParams(location.search).get("p");
 if (initial) void openProject(initial).then(() => {
     if (!state.project) void goHome();

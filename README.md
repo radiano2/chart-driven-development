@@ -8,9 +8,12 @@ Build an app by drawing and growing a flowchart. You describe an idea, the AI su
 
 ```bash
 npm install
-cp .env.example .env        # put your DEEPSEEK_API_KEY in .env
 npm start                   # http://localhost:4317
 ```
+
+Then click **⚙ Settings** (top right), paste your DeepSeek API key and press **Save**. It's checked against DeepSeek right away and takes effect without a restart.
+The key is stored only on this computer in `.cdd/settings.json` (git-ignored, readable only by you) and is never sent back to the browser.
+`DEEPSEEK_API_KEY` in `.env` still works too; a key saved in Settings takes priority. From a terminal: `npm run cdd -- set-key`.
 
 No API key yet? `npm run start:mock` runs the whole flow offline with a canned "todo app" so you can click around.
 
@@ -69,7 +72,7 @@ Avoid running the CLI and the web app on the **same** project at the same moment
 
 - Generated projects: `./projects/<name>/` (change with `CDD_WORKSPACE`). Each one is a normal folder with its own git repo.
 - The chart is stored next to the code in `.chart/chart.json`, so it is versioned together with the code.
-- The app binds to `127.0.0.1` only. Single user, no accounts.
+- The app binds to `127.0.0.1` only. Single user, no accounts. The API only accepts JSON requests from the app's own page, so other websites you visit can't call it (CSRF / DNS-rebinding protection).
 
 ## Code layout
 
