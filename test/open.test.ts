@@ -160,6 +160,11 @@ describe("folders that can't be opened", () => {
     assert.match((await ws.inspect(path.join(wsRoot, "stray"))).blocked ?? "", /isn't a project/);
   });
 
+  it("refuses the app's own code", async () => {
+    await write(path.join(tmp, "app", "src"), { "index.js": "export function x() {}\n" });
+    assert.match((await ws.inspect(path.join(tmp, "app", "src"))).blocked ?? "", /part of Chart Driven Development itself/);
+  });
+
   it("refuses empty folders and missing paths", async () => {
     await mkdir(path.join(disk, "empty"), { recursive: true });
     assert.match((await ws.inspect(path.join(disk, "empty"))).blocked ?? "", /empty/);
@@ -196,6 +201,13 @@ describe("find it for me", () => {
     assert.ok(!names.includes("secret-shooter") && !names.includes("shooter-lib"));
     assert.ok(!scan.candidates.some((c) => c.path.includes(`${path.sep}src`)), "doesn't look inside a project");
     assert.equal(scan.candidates.find((c) => c.name === "space-shooter")?.description, "A canvas space shooter game");
+  });
+
+  it("keeps searching when the root itself is a repo (dotfiles in the home folder)", async () => {
+    const home = path.join(tmp, "dotfiles-home");
+    await write(home, { ".git/HEAD": "ref: refs/heads/main\n", "code/site/package.json": "{}" });
+    const scan = await scanForProjects({ roots: [home] });
+    assert.deepEqual(scan.candidates.map((c) => c.name), ["site"]);
   });
 
   it("ranks the folders that match the description", async () => {

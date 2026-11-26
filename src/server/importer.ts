@@ -92,6 +92,8 @@ export const DEFAULT_EXCLUDES = [
   "*.log",
 ];
 
+const EXCLUDED_DIRS = new Set(DEFAULT_EXCLUDES.filter((e) => e.endsWith("/")).map((e) => e.slice(0, -1)));
+
 const SOURCE_EXT: Record<string, string> = {
   ".ts": "TypeScript",
   ".tsx": "TypeScript",
@@ -231,7 +233,8 @@ export async function countFiles(dir: string, cap = MAX_FILES + 1): Promise<{ fi
     for (const e of entries) {
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) {
-        if (e.name === ".git" || SKIP_DIRS.has(e.name) || [".venv", ".next", ".nuxt", ".cache"].includes(e.name)) continue;
+        // Same folders DEFAULT_EXCLUDES leaves out of the new repo, so the count matches what gets committed.
+        if (e.name === ".git" || EXCLUDED_DIRS.has(e.name)) continue;
         stack.push(r);
       } else if (e.isFile() && !/^(\.DS_Store|Thumbs\.db)$/.test(e.name) && !/\.(log|pyc)$/.test(e.name) && !/^\.env(\.|$)/.test(e.name)) {
         paths.push(r);
@@ -372,6 +375,8 @@ export async function scanForProjects(opts: ScanOptions): Promise<ScanResult> {
       /* missing root */
     }
   }
+  // A root is never a candidate itself (a home folder with a dotfiles repo would otherwise end the search there).
+  const roots = new Set(level);
   for (let d = 0; d <= depth && level.length; d++) {
     const next: string[] = [];
     for (const dir of level) {
@@ -388,7 +393,7 @@ export async function scanForProjects(opts: ScanOptions): Promise<ScanResult> {
         continue;
       }
       const names = entries.map((e) => e.name);
-      const markers = d > 0 || !opts.roots.includes(dir) ? isProjectEntry(names) : [];
+      const markers = roots.has(dir) ? [] : isProjectEntry(names);
       if (markers.length) {
         let modified = "";
         try {

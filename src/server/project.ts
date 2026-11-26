@@ -459,6 +459,7 @@ export class Project {
 function dropMissingFiles(root: Chart, known: Set<string>): string[] {
   const warnings: string[] = [];
   const check = (b: Bubble) => {
+    if (b.file) b.file = b.file.replace(/\\/g, "/").replace(/^(\.\/)+/, "");
     if (b.file && !known.has(b.file)) {
       warnings.push(`${b.name}: the AI named a file that doesn't exist (${b.file}), so it isn't linked.`);
       delete b.file;
@@ -596,8 +597,11 @@ export class Workspace {
     return this.linked().find((l) => (realOrNull(l.dir) ?? l.dir) === dir)?.name ?? null;
   }
 
+  /** Names being given to folders that are still being opened. */
+  private reserved = new Set<string>();
+
   private freeName(base: string): string {
-    const taken = (n: string) => existsSync(path.join(this.root, n)) || this.linked().some((l) => l.name === n);
+    const taken = (n: string) => existsSync(path.join(this.root, n)) || this.linked().some((l) => l.name === n) || this.reserved.has(n);
     const s = slug(base).slice(0, 60);
     let name = s;
     for (let i = 2; taken(name); i++) name = `${s}-${i}`;
@@ -630,6 +634,7 @@ export class Workspace {
     const guarded = [realRoot, ...(this.options.protectedDirs ?? []).map((d) => realOrNull(d) ?? d)];
     if (path.dirname(dir) === dir || dir === (realOrNull(homeDir()) ?? homeDir())) return block("That's a whole drive or your home folder. Pick the project's own folder.");
     if (guarded.some((g) => within(g, dir))) return block("That folder holds Chart Driven Development itself or its projects folder. Pick the project's own folder.");
+    if (guarded.slice(1).some((g) => within(dir, g)) && !within(dir, realRoot)) return block("That folder is part of Chart Driven Development itself. Pick one of your own projects.");
     if (within(dir, realRoot) && !known) return block("That's inside the app's projects folder but isn't a project. Open the project's own folder.");
 
     const top = await git.topLevel(dir);
@@ -690,6 +695,18 @@ export class Workspace {
       const p = this.get(info.name);
       return { name: p.name, chart: await p.loadChart() };
     }
+    // Pick the name again and hold it: another folder with the same name may be opening at the same time.
+    const name = this.freeName(path.basename(dir) || "project");
+    this.reserved.add(name);
+    try {
+      return await this.link({ ...info, name });
+    } finally {
+      this.reserved.delete(name);
+    }
+  }
+
+  private async link(info: FolderInspection) {
+    const dir = info.path;
     if (!info.git.repo) {
       await git.init(dir);
       await appendFile(path.join(dir, ".git", "info", "exclude"), `\n# Added by Chart Driven Development\n${DEFAULT_EXCLUDES.join("\n")}\n`);
