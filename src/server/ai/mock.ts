@@ -4,7 +4,8 @@ import { getLevel, slug } from "../../shared/chart.ts";
 import type { Bubble, ChangeSet, ChartOp, FileChange, Level, ProjectChart, Recommendation, RunTrace } from "../../shared/types.ts";
 import type { StyleGuide } from "../../shared/types.ts";
 import { styleCss } from "../design/style.ts";
-import type { AI, DesignContext, FocusContext, MockupDraft, SyncContext, WriteCodeContext } from "./ai.ts";
+import type { AI, DesignContext, FocusContext, FolderCandidate, ImportContext, ImportedChart, MockupDraft, SyncContext, WriteCodeContext } from "./ai.ts";
+import { keywordScore } from "../importer.ts";
 import { TODO_ALTERNATIVES, TODO_CHART, TODO_MODULE_FILES, TODO_SCAFFOLD, TODO_STACK } from "./mock-todo.ts";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -131,6 +132,40 @@ export class MockAI implements AI {
       }
     }
     return { summary: ops.length ? `Updated ${ops.length} bubble(s) from the code.` : "The chart already matches the code.", ops, files: [] };
+  }
+
+  /** A rough chart from the code itself: one module per top folder, one bubble per function it defines. */
+  async chartFromCode(ctx: ImportContext): Promise<ImportedChart> {
+    const groups = new Map<string, FileChange[]>();
+    for (const f of ctx.files) {
+      if (!f.content || !/\.(m?[jt]sx?|py|go|rs|rb)$/.test(f.path)) continue;
+      const parts = f.path.split("/");
+      const key = parts.length > 2 && /^(src|lib|app)$/.test(parts[0]) ? parts[1] : parts.length > 1 ? parts[0] : f.path.replace(/\.\w+$/, "");
+      groups.set(key, [...(groups.get(key) ?? []), f]);
+    }
+    const nodes: Bubble[] = [];
+    for (const [key, files] of [...groups].slice(0, 8)) {
+      const fns: Bubble[] = [];
+      for (const f of files) {
+        for (const m of f.content!.matchAll(/(?:function\s+|def\s+|func\s+|fn\s+|(?:const|let)\s+)([A-Za-z_]\w*)\s*(?:=\s*(?:async\s*)?\(|\()/g)) {
+          const id = slug(m[1]);
+          if (fns.some((b) => b.id === id) || fns.length >= 8) continue;
+          fns.push({ id, name: m[1], kind: "function", description: `${m[1]} in ${f.path}.`, inputs: [], outputs: [], status: "ready", file: f.path, symbol: m[1] });
+        }
+      }
+      nodes.push({ id: slug(key), name: key, kind: "module", description: `Code in ${files.map((f) => f.path).join(", ")}.`, inputs: [], outputs: [], status: "ready", file: files[0].path, children: { nodes: fns, edges: [] } });
+    }
+    const edges = nodes.slice(1).map((n, i) => ({ id: `${nodes[i].id}--${n.id}`, from: nodes[i].id, to: n.id, data: "data", order: i + 1 }));
+    return { idea: `The existing ${ctx.folder} project`, summary: `${nodes.length} module(s) read from ${ctx.files.length} file(s).`, stack: null, root: { nodes, edges } };
+  }
+
+  async pickProjects(ctx: { request: string; candidates: FolderCandidate[] }) {
+    return ctx.candidates
+      .map((c) => ({ c, score: keywordScore(ctx.request, c) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5)
+      .map((x) => ({ path: x.c.path, reason: `"${x.c.name}" matches what you typed.` }));
   }
 
   async simulateRun(chart: ProjectChart, level: Level): Promise<RunTrace> {

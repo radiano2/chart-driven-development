@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normStyle } from "../design/style.ts";
-import type { AI, DesignContext, FocusContext, MockupDraft, SyncContext, WriteCodeContext } from "./ai.ts";
+import type { AI, DesignContext, FocusContext, FolderCandidate, ImportContext, ImportedChart, MockupDraft, SyncContext, WriteCodeContext } from "./ai.ts";
 import type { JsonLLM } from "./deepseek.ts";
 
 const PREAMBLE = `You are the engine of "Chart Driven Development", an app where software is built as a flowchart.
@@ -281,6 +281,60 @@ Do not change any code. Return: { "summary": "one sentence on what changed in th
       { maxTokens: 4000 },
     );
     return { ...normChangeSet(raw), files: [] };
+  }
+
+  async chartFromCode(ctx: ImportContext): Promise<ImportedChart> {
+    const tree = ctx.tree.join("\n").slice(0, 40_000);
+    const raw = (await this.llm.json(
+      PREAMBLE,
+      `The user opened an existing project, folder "${ctx.folder}". The code was NOT written by this app. Read it and draw its chart.
+
+All files in the project${ctx.tree.length >= 2000 ? " (first 2000)" : ""}:
+${tree}
+
+Contents of the most telling files${ctx.omitted ? ` (${ctx.omitted} more source files exist but aren't shown: chart them from their paths at module level only)` : ""}:
+${filesBlock(ctx.files, 120_000)}
+
+Draw the chart of the code AS IT IS. Do not invent features, and do not change or write any code.
+- 2 to 8 modules: the real parts of the app (a folder, a layer, or a group of files that work together). Each module's "file" is its main file.
+- Inside each module, 2 to 8 function bubbles for its most important functions, classes or components, each with the "file" it is in and the exact "symbol" name as written in the code. Only use files from the list above and symbols you actually saw.
+- Inputs and outputs: the real parameters and return values, as short data shapes.
+- Edges: who calls whom and what data flows, numbered in call order. Across modules use "module-id/function-id".
+- Mark bubbles that draw UI with "gui".
+Also describe the project: "idea" is one sentence on what the app does, for the user; "stack" is the tech stack you see.
+Return: { "idea": "...", "summary": "one or two sentences on how the code is organised",
+"stack": { "name": "short label", "language": "...", "runtime": "...", "libraries": ["..."], "runCommand": "the command that starts it, from the manifest or README", "appUrl": "http://localhost:<port> if it's a web app and you can tell the port, else omit", "reasoning": "what you saw that tells you this" },
+"chart": ${CHART_SHAPE} }`,
+      { maxTokens: 16_000 },
+    )) as Record<string, unknown>;
+    const root = normChart(raw.chart ?? raw.root, "module");
+    for (const m of root.nodes) m.kind = "module";
+    return {
+      idea: String(raw.idea ?? "").trim().slice(0, 300),
+      summary: String(raw.summary ?? "Drew the chart from the existing code.").trim().slice(0, 600),
+      stack: normStack(raw.stack),
+      root,
+    };
+  }
+
+  async pickProjects(ctx: { request: string; candidates: FolderCandidate[] }): Promise<{ path: string; reason: string }[]> {
+    const list = ctx.candidates
+      .map((c) => `- ${c.path} | ${c.markers.join(",")} | changed ${c.modified.slice(0, 10) || "?"}${c.description ? ` | ${c.description}` : ""}`)
+      .join("\n");
+    const raw = (await this.llm.json(
+      "You help someone find a project folder on their computer. Respond ONLY with one JSON object.",
+      `They are looking for: "${ctx.request}"
+
+Project folders found (path | marker files | last changed | description):
+${list}
+
+Pick the folders that best match, best first (at most 5). Only use paths exactly as listed. If nothing plausibly matches, return an empty list.
+Return: { "matches": [ { "path": "exact path from the list", "reason": "one short sentence on why it matches" } ] }`,
+      { maxTokens: 1500 },
+    )) as Record<string, unknown>;
+    return (Array.isArray(raw.matches) ? raw.matches : [])
+      .filter((m) => m && typeof m === "object" && typeof (m as { path?: unknown }).path === "string")
+      .map((m) => ({ path: String((m as { path: string }).path).trim(), reason: String((m as { reason?: unknown }).reason ?? "").trim().slice(0, 300) }));
   }
 
   async simulateRun(chart: ProjectChart, level: Level): Promise<RunTrace> {

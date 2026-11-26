@@ -47,6 +47,35 @@ export interface DesignContext {
   files: FileChange[];
 }
 
+/** An existing codebase the user opened: what the AI sees to draw its chart. */
+export interface ImportContext {
+  /** The folder's name. */
+  folder: string;
+  /** Every file in the project (may be cut short for very big projects). */
+  tree: string[];
+  /** Contents of the most telling files (manifests, README, entry points, source), within a size budget. */
+  files: FileChange[];
+  /** Source files that exist but were left out of `files` for size. */
+  omitted: number;
+}
+
+export interface ImportedChart {
+  /** One sentence on what the app does (shown as the project's idea). */
+  idea: string;
+  stack: Stack | null;
+  root: ProjectChart["root"];
+  summary: string;
+}
+
+/** A project folder found on disk, as the AI sees it when picking matches. */
+export interface FolderCandidate {
+  path: string;
+  name: string;
+  description: string;
+  markers: string[];
+  modified: string;
+}
+
 export interface MockupDraft {
   title: string;
   summary: string;
@@ -72,6 +101,10 @@ export interface AI {
   implementBubble(ctx: FocusContext): Promise<ChangeSet>;
   /** Read code edited outside the app and update the chart to match. */
   syncFromCode(ctx: SyncContext): Promise<ChangeSet>;
+  /** Read an existing codebase and draw its chart (modules → function bubbles). Never changes code. */
+  chartFromCode(ctx: ImportContext): Promise<ImportedChart>;
+  /** Pick the folders that best match what the user described. Paths must come from `candidates`. */
+  pickProjects(ctx: { request: string; candidates: FolderCandidate[] }): Promise<{ path: string; reason: string }[]>;
   /** Invent abstract sample data and trace it through one chart level. */
   simulateRun(chart: ProjectChart, level: Level): Promise<RunTrace>;
 

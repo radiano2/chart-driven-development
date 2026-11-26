@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import type { HistoryEntry } from "../shared/types.ts";
 
@@ -81,4 +82,51 @@ export async function restore(cwd: string, sha: string, message: string): Promis
   // Files added after `sha` are now untracked: delete them (ignored files are kept).
   await git(cwd, ["clean", "-f", "-d", "-q", "-e", "node_modules"]);
   return commitAll(cwd, message);
+}
+
+/** The top folder of the git repo `cwd` is in, or null when it isn't in one. */
+export async function topLevel(cwd: string): Promise<string | null> {
+  try {
+    return (await git(cwd, ["rev-parse", "--show-toplevel"])).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Current branch name, or null for a detached HEAD. */
+export async function currentBranch(cwd: string): Promise<string | null> {
+  try {
+    return (await git(cwd, ["symbolic-ref", "-q", "--short", "HEAD"])).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** True while a merge, rebase, cherry-pick or revert is half done. */
+export async function midOperation(cwd: string): Promise<boolean> {
+  for (const name of ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]) {
+    try {
+      const p = (await git(cwd, ["rev-parse", "--path-format=absolute", "--git-path", name])).trim();
+      if (existsSync(p)) return true;
+    } catch {
+      /* older git: fall through */
+    }
+  }
+  return false;
+}
+
+/** Tracked and untracked (not ignored) files, as paths relative to `cwd`. */
+export async function listFiles(cwd: string): Promise<string[]> {
+  const out = await git(cwd, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
+  return [...new Set(out.split("\0").filter(Boolean))];
+}
+
+/** True when `sha` has `file` in it. */
+export async function hasFileAt(cwd: string, sha: string, file: string): Promise<boolean> {
+  try {
+    await git(cwd, ["cat-file", "-e", `${sha}:${file}`]);
+    return true;
+  } catch {
+    return false;
+  }
 }

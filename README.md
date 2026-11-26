@@ -21,6 +21,36 @@ No API key yet? `npm run start:mock` runs the whole flow offline with a canned "
 
 Requires Node 20+ and git.
 
+## Open a project you already have
+
+Under **Open an existing project** on the home page:
+
+- **Type a folder's path** (`~/code/my-app` works) or click **Browse…** to click through your folders. Folders that look like projects are marked.
+- Or describe it and press **Find it for me** ("the recipe site I made in React"). The app looks through your home folder for project folders (ones with `.git`, `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, … ), and DeepSeek picks the best matches. You pick one.
+
+Before anything is opened you see what's in the folder and exactly what opening it will do, and you confirm.
+
+- A **Chart Driven Development project** (it has `.chart/chart.json`) is added to your projects as it is.
+- **Any other codebase**: DeepSeek reads the code (manifests and README first, then the source, up to about 110 KB) and draws its chart: modules, the important functions inside each with their real file and name, inputs, outputs and who calls whom. Your code isn't changed. After that it works like any other project.
+
+Versions in an existing folder:
+
+- **Already a git repo**: the chart is committed to your current branch, and so is each change the app makes after that, one commit each. Nothing is rewritten. Undo and History stop at the chart's first version; anything older is yours to handle with git.
+- **Not a git repo yet**: the app starts one and first commits the files as they are ("Before Chart Driven Development"). Dependencies, build output, logs and `.env` files are left out through `.git/info/exclude`, so no new file appears in your folder.
+
+To keep your work safe, the app won't open a folder that:
+- is a repo with uncommitted changes (commit or stash them first, so they don't get mixed into the app's versions),
+- is a repo on a detached HEAD or in the middle of a merge or rebase,
+- is a sub-folder of a bigger git repo (open the repo's top folder; the app's undo works on the whole repo),
+- is your home folder, a whole drive, or holds this app or its projects folder,
+- has more than 20,000 files.
+
+Opened folders are remembered in `projects/.linked-projects.json`. **Remove from list** under a project forgets it; the folder, its chart and its history stay as they are.
+
+About **Find it for me**: it only reads. It lists folders under your home folder (or the folders in `CDD_SEARCH_ROOTS`, separated by `:` or `;` on Windows), up to 5 levels deep, skipping hidden folders, system and app folders (`Library`, `AppData`, …) and dependencies (`node_modules`, `vendor`, …), and doesn't follow symlinks or look inside a project once it finds one. It stops after about 6 seconds. For each project folder it reads only the `package.json` description or the first lines of the README. The paths and those short descriptions (up to 150 folders, keyword matches first) are sent to DeepSeek to pick the matches; no code is sent until you open a folder. Without an API key it matches by name instead.
+
+From a terminal: `npm run cdd -- open ~/code/my-app`, `npm run cdd -- find "recipe site"`, `npm run cdd -- forget my-app`.
+
 ## How it works
 
 | You do | What happens |
@@ -60,6 +90,8 @@ The same assistant runs headless in a terminal, with no browser or server needed
 
 ```bash
 npm run cdd -- projects
+npm run cdd -- open ~/code/my-app     # open a folder (asks first; --yes in scripts)
+npm run cdd -- find "recipe site"     # look for a project folder
 npm run cdd -- chart todo-app todos
 npm run cdd -- ask todo-app "add a priority to todos and show it in the list"
 npm run cdd -- chat todo-app          # conversation; type exit to quit
@@ -90,6 +122,7 @@ Design files live in the project under `.chart/design/` and are versioned with t
 ## Where things live
 
 - Generated projects: `./projects/<name>/` (change with `CDD_WORKSPACE`). Each one is a normal folder with its own git repo.
+- Projects you opened from elsewhere stay where they are; the app only remembers their paths.
 - The chart is stored next to the code in `.chart/chart.json`, so it is versioned together with the code.
 - The app binds to `127.0.0.1` only. Single user, no accounts. The API only accepts JSON requests from the app's own page, so other websites you visit can't call it (CSRF / DNS-rebinding protection).
 

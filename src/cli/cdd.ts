@@ -11,6 +11,9 @@ import type { AssistantEvent } from "../shared/types.ts";
 const HELP = `Chart Driven Development, command line
 
   cdd projects                       list projects
+  cdd open <folder> [--yes]          open a folder: a chart project, or any codebase (draws its chart)
+  cdd find <description…>            look for a project folder on this computer (read-only)
+  cdd forget <project>               remove an opened folder from the list (the folder stays as it is)
   cdd chart <project> [module]       print the chart (or one module's inner chart)
   cdd ask <project> <message…>       ask the assistant once, then exit
   cdd chat <project>                 talk to the assistant (type "exit" to quit, "reset" to forget)
@@ -61,8 +64,43 @@ async function main(argv: string[]) {
   if (cmd === "projects") {
     const list = await ws.list();
     if (!list.length) return out(`No projects in ${cfg.workspace}.`);
-    for (const p of list) out(`${p.name.padEnd(24)} ${p.idea}${p.hasChart ? "" : "  (not generated yet)"}`);
+    for (const p of list) out(`${p.name.padEnd(24)} ${p.missing ? "(folder missing)" : p.idea}${p.hasChart || p.missing ? "" : "  (not generated yet)"}${p.dir ? `\n${"".padEnd(25)}${p.dir}` : ""}`);
     return;
+  }
+  if (cmd === "open") {
+    if (!name) throw new Error("Usage: cdd open <folder> [--yes]");
+    const info = await ws.inspect(name);
+    out(`${info.display}: ${info.kind === "chart" ? "Chart Driven Development project" : "codebase without a chart"}, ${info.git.repo ? `git repo${info.git.branch ? ` on ${info.git.branch}` : ""}` : "not a git repo yet"}, ${info.files} files${info.languages.length ? `, ${info.languages.join(", ")}` : ""}`);
+    if (info.blocked) throw new Error(info.blocked);
+    for (const line of info.plan) out(`  - ${line}`);
+    if (!info.known && !rest.includes("--yes")) {
+      if (process.stdin.isTTY !== true) throw new Error("Add --yes to open it from a script.");
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      const a = await rl.question("Go ahead? [y/N] ").finally(() => rl.close());
+      if (!/^y(es)?$/i.test(a.trim())) return out("Nothing changed.");
+    }
+    if (info.kind === "code") log("Reading the code and drawing the chart…");
+    const r = await ws.openFolder(name);
+    ws.closeAll();
+    out(`Opened as "${r.name}".${r.summary ? ` ${r.summary}` : ""}`);
+    for (const w of r.warnings ?? []) log(`  ! ${w}`);
+    return;
+  }
+  if (cmd === "find") {
+    const text = [name, ...rest].filter(Boolean).join(" ");
+    if (!text.trim()) throw new Error("Usage: cdd find <description…>");
+    log("Looking through your folders (read-only)…");
+    const r = await ws.find(text);
+    if (r.note) log(r.note);
+    if (!r.matches.length) return out(`Looked at ${r.searched} project folders in ${r.roots.join(", ")}; none matched.`);
+    for (const m of r.matches) out(`${m.display}${m.chart ? "  (chart project)" : ""}\n    ${m.reason}`);
+    out(`\nOpen one with: cdd open <folder>`);
+    return;
+  }
+  if (cmd === "forget") {
+    if (!name) throw new Error("Usage: cdd forget <project>");
+    ws.forget(name);
+    return out(`Removed "${name}" from the list. Its folder is unchanged.`);
   }
   if (!name) throw new Error(`Usage: cdd ${cmd} <project>`);
   const project = ws.get(name);

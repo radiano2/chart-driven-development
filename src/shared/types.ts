@@ -137,6 +137,74 @@ export interface ProjectSummary {
   name: string;
   idea: string;
   hasChart: boolean;
+  /** Set for a folder opened from elsewhere on disk (not under the app's projects folder): its path, with "~" for the home folder. */
+  dir?: string;
+  linked?: boolean;
+  /** A linked folder that isn't there any more (moved or deleted). */
+  missing?: boolean;
+}
+
+// ---------- opening existing folders ----------
+
+/** What the app found in a folder before opening it, shown so the user can confirm. */
+export interface FolderInspection {
+  /** Absolute path (symlinks resolved). */
+  path: string;
+  /** The path with the home folder shortened to "~". */
+  display: string;
+  /** "chart": already a Chart Driven Development project. "code": a plain codebase; opening draws its chart. */
+  kind: "chart" | "code";
+  /** Name the project has (or will get) in the app. */
+  name: string;
+  /** Already in the app's project list under this name. */
+  known: boolean;
+  git: { repo: boolean; branch: string | null; changes: number };
+  /** Files git would track (approximate for folders that aren't repos yet). */
+  files: number;
+  /** Main languages, most files first. */
+  languages: string[];
+  /** Why it can't be opened, or null when it can. */
+  blocked: string | null;
+  /** What opening it will do, one sentence each. */
+  plan: string[];
+}
+
+export interface FolderEntry {
+  name: string;
+  path: string;
+  /** Looks like a project (has a git repo, package.json, pyproject.toml, …). */
+  project: boolean;
+}
+
+export interface FolderListing {
+  path: string;
+  display: string;
+  parent: string | null;
+  dirs: FolderEntry[];
+  /** More sub-folders than shown. */
+  more: boolean;
+}
+
+/** A folder "Find it for me" thinks may be the project the user described. */
+export interface FoundProject {
+  path: string;
+  display: string;
+  name: string;
+  description: string;
+  /** Why it matches, from the AI (or the keyword match when the AI isn't available). */
+  reason: string;
+  chart: boolean;
+  modified: string;
+}
+
+export interface FindResult {
+  matches: FoundProject[];
+  /** How many project folders were looked at. */
+  searched: number;
+  /** Folders searched, as shown to the user. */
+  roots: string[];
+  /** Set when the search was cut short or the AI couldn't rank (keyword match used instead). */
+  note: string | null;
 }
 
 // ---------- design ----------

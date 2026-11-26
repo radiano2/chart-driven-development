@@ -1,5 +1,5 @@
 import { getLevel } from "../shared/chart.ts";
-import type { Bubble, DesignState, Level, Mockup, Port, ProjectChart, Recommendation, RunTrace, ServerEvent, Stack } from "../shared/types.ts";
+import type { Bubble, DesignState, FindResult, FolderInspection, FolderListing, Level, Mockup, Port, ProjectChart, ProjectSummary, Recommendation, RunTrace, ServerEvent, Stack } from "../shared/types.ts";
 import { api, type ChangeResult } from "./api.ts";
 import { ChartView } from "./chart-view.ts";
 
@@ -166,16 +166,36 @@ async function goHome() {
   list.replaceChildren(h("p", { class: "muted" }, "Loading…"));
   try {
     const projects = await api.projects();
-    list.replaceChildren(
-      ...(projects.length
-        ? projects.map((p) =>
-            h("button", { class: "project card", onclick: () => void openProject(p.name) }, h("strong", {}, p.name), h("span", { class: "muted" }, p.idea), !p.hasChart && h("span", { class: "badge" }, "not generated yet")),
-          )
-        : [h("p", { class: "muted" }, "No projects yet. Describe an idea above to start one.")]),
-    );
+    list.replaceChildren(...(projects.length ? projects.map(projectCard) : [h("p", { class: "muted" }, "No projects yet. Describe an idea above to start one, or open one you already have.")]));
   } catch (e) {
     list.replaceChildren(h("p", { class: "error" }, (e as Error).message));
   }
+}
+
+function projectCard(p: ProjectSummary) {
+  const card = h(
+    "button",
+    { class: "project card", disabled: p.missing, onclick: () => void openProject(p.name) },
+    h("strong", {}, p.name),
+    p.missing ? h("span", { class: "error small" }, "The folder isn't there any more. It may have moved; open it again from its new place.") : h("span", { class: "muted" }, p.idea),
+    p.dir && h("code", { class: "small muted path" }, p.dir),
+    !p.hasChart && !p.missing && h("span", { class: "badge" }, "not generated yet"),
+  );
+  if (!p.linked) return card;
+  const forget = h(
+    "button",
+    {
+      class: "link small forget",
+      title: "Remove it from this list. The folder, its code, chart and history stay as they are.",
+      onclick: () =>
+        void guard("Removing from the list…", async () => {
+          await api.forget(p.name);
+          await goHome();
+        }),
+    },
+    "Remove from list",
+  );
+  return h("div", { class: "project-item" }, card, forget);
 }
 
 function subscribe(name: string) {
@@ -767,6 +787,143 @@ $("new-form").addEventListener("submit", (e) => {
     subscribe(p.name);
     setBusy(null);
     await startStackChoice(p.name, idea);
+  });
+});
+
+// ---------- open an existing folder ----------
+
+const openResult = () => $("open-result");
+
+function closeOpenResult() {
+  openResult().replaceChildren();
+}
+
+async function browse(path: string | null) {
+  let listing: FolderListing;
+  try {
+    listing = await api.browse(path);
+  } catch (e) {
+    toast((e as Error).message, "error");
+    return;
+  }
+  ($("open-path") as HTMLInputElement).value = listing.display;
+  const rows = listing.dirs.map((d) =>
+    h(
+      "li",
+      {},
+      h("button", { class: "folder", title: d.path, onclick: () => void browse(d.path) }, `📁 ${d.name}`),
+      d.project && h("span", { class: "badge" }, "project"),
+      d.project && h("button", { class: "small", onclick: () => void inspectFolder(d.path) }, "Open…"),
+    ),
+  );
+  openResult().replaceChildren(
+    h(
+      "div",
+      { class: "browser" },
+      h(
+        "div",
+        { class: "browser-head" },
+        listing.parent ? h("button", { title: "Up one folder", onclick: () => void browse(listing.parent) }, "↑ Up") : null,
+        h("code", { class: "small" }, listing.display),
+        h("span", { class: "spacer" }),
+        h("button", { class: "primary", onclick: () => void inspectFolder(listing.path) }, "Open this folder…"),
+        h("button", { onclick: closeOpenResult }, "Close"),
+      ),
+      rows.length ? h("ul", { class: "folder-list" }, ...rows) : h("p", { class: "muted small" }, "No folders in here."),
+      listing.more ? h("p", { class: "muted small" }, "Only the first 500 folders are shown. Type the path above to go straight to one.") : null,
+    ),
+  );
+}
+
+async function inspectFolder(path: string) {
+  const info = await guard("Looking at the folder…", () => api.inspectFolder(path));
+  if (!info) return;
+  ($("open-path") as HTMLInputElement).value = info.display;
+  openResult().replaceChildren(inspectionCard(info));
+}
+
+function inspectionCard(info: FolderInspection) {
+  const facts = [
+    info.kind === "chart" ? "Chart Driven Development project" : "Codebase without a chart",
+    info.git.repo ? `git repo${info.git.branch ? ` on "${info.git.branch}"` : ""}` : "not a git repo yet",
+    `${info.files.toLocaleString()} file${info.files === 1 ? "" : "s"}`,
+    info.languages.join(", "),
+  ].filter(Boolean);
+  const go = info.kind === "code" ? "Read the code and draw the chart" : info.known ? "Open" : "Add and open";
+  return h(
+    "div",
+    { class: "inspect" },
+    h("h3", {}, info.display),
+    h("p", { class: "small muted" }, facts.join(" · ")),
+    info.blocked
+      ? h("p", { class: "error" }, info.blocked)
+      : info.plan.length
+        ? h("ul", { class: "plan small" }, ...info.plan.map((line) => h("li", {}, line)))
+        : null,
+    h(
+      "div",
+      { class: "actions" },
+      !info.blocked && h("button", { class: "primary ai", onclick: () => void openFolder(info) }, go),
+      info.blocked && h("button", { onclick: () => void inspectFolder(info.path) }, "Check again"),
+      h("button", { onclick: closeOpenResult }, "Cancel"),
+    ),
+  );
+}
+
+async function openFolder(info: FolderInspection) {
+  const label = info.kind === "code" ? "Reading the code and drawing the chart…" : "Opening project…";
+  const r = await guard(label, () => api.openPath(info.path));
+  if (!r) return;
+  closeOpenResult();
+  ($("open-path") as HTMLInputElement).value = "";
+  await openProject(r.name);
+  if (info.kind === "code") {
+    const extra = r.warnings?.length ? ` ${r.warnings.length} bubble(s) named files that don't exist and were left unlinked.` : "";
+    toast(`${r.summary ?? "The chart is drawn from your code."} Double-click a module to open it.${extra}`);
+  }
+}
+
+function findResults(r: FindResult) {
+  const items = r.matches.map((m) =>
+    h(
+      "li",
+      { class: "found" },
+      h("div", {}, h("strong", {}, m.name), m.chart && h("span", { class: "badge" }, "chart project")),
+      h("code", { class: "small muted" }, m.display),
+      m.description && h("p", { class: "small" }, m.description),
+      m.reason && h("p", { class: "small muted" }, m.reason),
+      h("button", { class: "small", onclick: () => void inspectFolder(m.path) }, "Open…"),
+    ),
+  );
+  return h(
+    "div",
+    { class: "find-results" },
+    h(
+      "p",
+      { class: "small muted" },
+      r.matches.length
+        ? `Looked at ${r.searched} project folder${r.searched === 1 ? "" : "s"} in ${r.roots.join(", ")}. Best matches:`
+        : `Looked at ${r.searched} project folder${r.searched === 1 ? "" : "s"} in ${r.roots.join(", ")} and none matched. Try other words, or use Browse.`,
+    ),
+    r.note && h("p", { class: "small muted" }, r.note),
+    items.length ? h("ul", { class: "found-list" }, ...items) : null,
+    h("div", { class: "actions" }, h("button", { onclick: closeOpenResult }, "Close")),
+  );
+}
+
+$("open-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const path = ($("open-path") as HTMLInputElement).value.trim();
+  if (!path) return void browse(null);
+  void inspectFolder(path);
+});
+$("open-browse").addEventListener("click", () => void browse(($("open-path") as HTMLInputElement).value.trim() || null));
+$("find-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = ($("find-text") as HTMLInputElement).value.trim();
+  if (!text) return;
+  void guard("Looking for project folders…", async () => {
+    openResult().replaceChildren(findResults(await api.find(text)));
   });
 });
 

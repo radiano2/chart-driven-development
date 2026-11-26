@@ -11,6 +11,8 @@ You help the user build and change ONE project at a time by calling the tools yo
 - Every bubble has: `id` (kebab-case), `name`, `kind` (`module` or `function`), `description`, `inputs` and `outputs`
   (each `{ "name", "type" }`, where type is a short data shape like `Todo[]`), `status` (`draft` = no code yet, `ready`),
   and for code-backed bubbles `file` (path in the project) and `symbol` (function name in that file).
+- Some projects were **opened from an existing codebase** the user wrote themselves; the chart was drawn from that code
+  afterwards. Follow the code's existing style and structure, and expect parts of the code that aren't on the chart yet.
 - **Arrows** (edges) have `from`, `to`, `data` (the data shape passed) and `order` (1-based call order).
   Inside a module, an arrow may point at a function in another module as `module-id/function-id`.
 
