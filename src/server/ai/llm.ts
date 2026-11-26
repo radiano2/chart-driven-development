@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normStyle } from "../design/style.ts";
-import type { AI, DesignContext, FocusContext, FolderCandidate, ImportContext, ImportedChart, MockupDraft, SyncContext, WriteCodeContext } from "./ai.ts";
+import type { AI, DesignContext, FocusContext, FolderCandidate, ImportContext, ImportedModules, MockupDraft, ModuleContext, SyncContext, WriteCodeContext } from "./ai.ts";
 import type { JsonLLM } from "./deepseek.ts";
 
 const PREAMBLE = `You are the engine of "Chart Driven Development", an app where software is built as a flowchart.
@@ -283,38 +283,80 @@ Do not change any code. Return: { "summary": "one sentence on what changed in th
     return { ...normChangeSet(raw), files: [] };
   }
 
-  async chartFromCode(ctx: ImportContext): Promise<ImportedChart> {
+  async chartModules(ctx: ImportContext): Promise<ImportedModules> {
     const tree = ctx.tree.join("\n").slice(0, 40_000);
     const raw = (await this.llm.json(
       PREAMBLE,
-      `The user opened an existing project, folder "${ctx.folder}". The code was NOT written by this app. Read it and draw its chart.
+      `The user opened an existing project, folder "${ctx.folder}". The code was NOT written by this app. Read it and draw its module chart.
+(Each module's inner chart of functions is drawn in a later step, from that module's files.)
 
 All files in the project${ctx.tree.length >= 2000 ? " (first 2000)" : ""}:
 ${tree}
 
-Contents of the most telling files${ctx.omitted ? ` (${ctx.omitted} more source files exist but aren't shown: chart them from their paths at module level only)` : ""}:
+Contents of the most telling files${ctx.omitted ? ` (${ctx.omitted} more source files exist but aren't shown; place them in modules by their paths)` : ""}:
 ${filesBlock(ctx.files, 120_000)}
 
-Draw the chart of the code AS IT IS. Do not invent features, and do not change or write any code.
+Draw the code AS IT IS. Do not invent features, and do not change or write any code.
 - 2 to 8 modules: the real parts of the app (a folder, a layer, or a group of files that work together). Each module's "file" is its main file.
-- Inside each module, 2 to 8 function bubbles for its most important functions, classes or components, each with the "file" it is in and the exact "symbol" name as written in the code. Only use files from the list above and symbols you actually saw.
-- Inputs and outputs: the real parameters and return values, as short data shapes.
-- Edges: who calls whom and what data flows, numbered in call order. Across modules use "module-id/function-id".
-- Mark bubbles that draw UI with "gui".
+  Give each module a description, and its inputs and outputs as short data shapes.
+- "files": for every module, the list of its source files (paths exactly as listed above). Every source file belongs to at most one module.
+- Edges between modules: who calls whom and what data flows, numbered in call order.
+- Mark modules that draw UI with "gui".
 Also describe the project: "idea" is one sentence on what the app does, for the user; "stack" is the tech stack you see.
 Return: { "idea": "...", "summary": "one or two sentences on how the code is organised",
 "stack": { "name": "short label", "language": "...", "runtime": "...", "libraries": ["..."], "runCommand": "the command that starts it, from the manifest or README", "appUrl": "http://localhost:<port> if it's a web app and you can tell the port, else omit", "reasoning": "what you saw that tells you this" },
-"chart": ${CHART_SHAPE} }`,
-      { maxTokens: 16_000 },
+"modules": [ { "id": "kebab-id", "name": "Readable Name", "description": "...", "inputs": [...], "outputs": [...], "file": "main/file", "gui": {...} } ],
+"edges": [ { "from": "module-id", "to": "module-id", "data": "data shape", "order": 1 } ],
+"files": { "module-id": ["path", "..."] } }`,
+      { maxTokens: 8_000 },
     )) as Record<string, unknown>;
-    const root = normChart(raw.chart ?? raw.root, "module");
-    for (const m of root.nodes) m.kind = "module";
+    const root = normChart({ nodes: raw.modules ?? (raw.chart as Record<string, unknown> | undefined)?.nodes, edges: raw.edges ?? (raw.chart as Record<string, unknown> | undefined)?.edges }, "module");
+    for (const m of root.nodes) {
+      m.kind = "module";
+      m.children = { nodes: [], edges: [] };
+    }
+    const files: Record<string, string[]> = {};
+    const rawFiles = raw.files && typeof raw.files === "object" ? (raw.files as Record<string, unknown>) : {};
+    for (const [id, list] of Object.entries(rawFiles)) if (Array.isArray(list)) files[slug(id)] = list.map(String).slice(0, 500);
     return {
       idea: String(raw.idea ?? "").trim().slice(0, 300),
       summary: String(raw.summary ?? "Drew the chart from the existing code.").trim().slice(0, 600),
       stack: normStack(raw.stack),
       root,
+      files,
     };
+  }
+
+  async chartModule(ctx: ModuleContext): Promise<Chart> {
+    const others = ctx.chart.root.nodes
+      .filter((m) => m.id !== ctx.module.id)
+      .map((m) => `- ${m.id} (${m.name}): ${m.description}${m.children?.nodes.length ? `; functions: ${m.children.nodes.map((f) => f.id).join(", ")}` : ""}`)
+      .join("\n");
+    const raw = await this.llm.json(
+      PREAMBLE,
+      `The user opened an existing project, folder "${ctx.folder}" (${ctx.chart.idea}). The code was NOT written by this app.
+The module chart is drawn. Now draw the inner chart of module "${ctx.module.id}" (${ctx.module.name}): ${ctx.module.description}
+
+Other modules:
+${others || "(none)"}
+
+The module's files:
+${filesBlock(ctx.files, 70_000)}
+
+Draw the code AS IT IS. Do not invent anything, and do not change or write any code.
+- 2 to 8 function bubbles for the module's most important functions, classes or components, each with the "file" it is in and the exact "symbol" as written in the code. Only use the files shown and symbols you actually saw.
+- Inputs and outputs: the real parameters and return values, as short data shapes.
+- Edges: who calls whom inside the module, and what data flows, numbered in call order. A call to or from another module's function is an edge with "other-module-id/function-id" as that end.
+- Mark bubbles that draw UI with "gui".
+Return: { "nodes": [ { "id", "name", "kind": "function", "description", "inputs", "outputs", "file", "symbol" } ], "edges": [ { "from", "to", "data", "order" } ] }`,
+      { maxTokens: 6_000 },
+    );
+    const chart = normChart(raw, "function");
+    for (const f of chart.nodes) {
+      f.kind = "function";
+      delete f.children;
+    }
+    return chart;
   }
 
   async pickProjects(ctx: { request: string; candidates: FolderCandidate[] }): Promise<{ path: string; reason: string }[]> {

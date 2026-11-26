@@ -77,6 +77,8 @@ export interface ProjectChart {
   idea: string;
   stack: Stack | null;
   root: Chart;
+  /** Set while the chart of an opened codebase is still being drawn (it's saved after each step). */
+  drawing?: boolean;
 }
 
 /** Where in the chart we are: "root" is the module level, otherwise a module id. */
@@ -288,6 +290,10 @@ export type ServerEvent =
   | { type: "progress"; message: string }
   | { type: "chart"; chart: ProjectChart }
   | { type: "outside-change"; files: string[] }
+  /** Drawing the chart of an opened codebase finished (each step before arrives as a "chart" event). */
+  | { type: "drawn"; chart: ProjectChart; summary: string; warnings: string[] }
+  /** Drawing failed; the folder is left as it was before it was opened. */
+  | { type: "draw-failed"; message: string }
   | { type: "error"; message: string }
   | { type: "assistant"; event: AssistantEvent }
   | { type: "design"; design: DesignState };

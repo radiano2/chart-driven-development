@@ -59,6 +59,11 @@ export class ChartView {
   private selected: string | null = null;
   connectFrom: string | null = null;
   private runToken = 0;
+  /** What the last render showed, so the next one can animate what's new. */
+  private last: { key: string; pos: Map<string, Pt>; edges: Set<string>; inside: Map<string, number> } | null = null;
+  private smoothTimer = 0;
+  /** The user panned or zoomed since the last fit: growing charts then stop re-centring on their own. */
+  private touched = false;
 
   constructor(private svg: SVGSVGElement, private cb: ChartViewCallbacks) {
     const defs = el("defs", {}, svg);
@@ -83,6 +88,7 @@ export class ChartView {
       if (!drag) return;
       this.view.x = drag.vx + (e.clientX - drag.x);
       this.view.y = drag.vy + (e.clientY - drag.y);
+      this.touched = true;
       this.applyView();
     });
     const end = (e: PointerEvent) => {
@@ -108,6 +114,7 @@ export class ChartView {
         this.view.x = mx - ((mx - this.view.x) * k) / this.view.k;
         this.view.y = my - ((my - this.view.y) * k) / this.view.k;
         this.view.k = k;
+        this.touched = true;
         this.applyView();
       },
       { passive: false },
@@ -115,7 +122,15 @@ export class ChartView {
   }
 
   private applyView() {
-    this.root.setAttribute("transform", `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`);
+    this.root.style.transform = `translate(${this.view.x}px,${this.view.y}px) scale(${this.view.k})`;
+  }
+
+  /** Glide to the new view instead of jumping (used while the chart grows). Panning stays instant. */
+  private smoothly(fn: () => void) {
+    this.root.classList.add("smooth");
+    fn();
+    clearTimeout(this.smoothTimer);
+    this.smoothTimer = window.setTimeout(() => this.root.classList.remove("smooth"), 700);
   }
 
   fit() {
@@ -124,10 +139,12 @@ export class ChartView {
     const pad = 40;
     const k = Math.min(1.2, (r.width - pad * 2) / this.bounds.w, (r.height - pad * 2) / this.bounds.h);
     this.view = { k, x: (r.width - this.bounds.w * k) / 2, y: (r.height - this.bounds.h * k) / 2 };
+    this.touched = false;
     this.applyView();
   }
 
   zoomBy(f: number) {
+    this.touched = true;
     const r = this.svg.getBoundingClientRect();
     const k = Math.min(2.5, Math.max(0.25, this.view.k * f));
     this.view.x = r.width / 2 - ((r.width / 2 - this.view.x) * k) / this.view.k;
@@ -136,7 +153,13 @@ export class ChartView {
     this.applyView();
   }
 
-  render(chart: Chart, opts: { keepView?: boolean } = {}) {
+  /**
+   * Draw a chart level. With `animate`, and when the previous render showed the same level (`key`), new bubbles
+   * pop in one after another, then new arrows draw themselves; bubbles that moved glide to their new place, and a
+   * module that just got functions inside pulses. With `glide`, the view refits smoothly to the new size.
+   */
+  render(chart: Chart, opts: { keepView?: boolean; animate?: boolean; key?: string; glide?: boolean } = {}) {
+    const prev = opts.animate && this.last && this.last.key === (opts.key ?? "") ? this.last : null;
     this.stopRun();
     this.nodesG.replaceChildren();
     this.edgesG.replaceChildren();
@@ -174,8 +197,61 @@ export class ChartView {
     for (const n of chart.nodes) this.drawNode(n, g.node(n.id) as unknown as { x: number; y: number; width: number; height: number });
     for (const ref of ghosts) this.drawGhost(ref, g.node(ref) as unknown as { x: number; y: number; width: number; height: number });
 
+    if (prev) this.animateChanges(chart, prev);
+    this.last = {
+      key: opts.key ?? "",
+      pos: new Map([...this.nodeBoxes].map(([id, b]) => [id, { x: b.x, y: b.y }])),
+      edges: new Set(chart.edges.map((e) => e.id)),
+      inside: new Map(chart.nodes.map((n) => [n.id, n.children?.nodes.length ?? 0])),
+    };
+
     this.setSelected(this.selected && this.nodeEls.has(this.selected) ? this.selected : null);
-    if (!opts.keepView) requestAnimationFrame(() => this.fit());
+    if (opts.glide) {
+      if (!this.touched) requestAnimationFrame(() => this.smoothly(() => this.fit()));
+    }
+    else if (!opts.keepView) requestAnimationFrame(() => this.fit());
+  }
+
+  private animateChanges(chart: Chart, prev: NonNullable<ChartView["last"]>) {
+    const STAGGER = 140;
+    let fresh = 0;
+    let moved = false;
+    for (const [id, grp] of this.nodeEls) {
+      const was = prev.pos.get(id);
+      const now = this.nodeBoxes.get(id)!;
+      if (!was) {
+        grp.classList.add("appear");
+        grp.style.setProperty("--delay", `${fresh++ * STAGGER}ms`);
+      } else if (Math.abs(was.x - now.x) + Math.abs(was.y - now.y) > 1) {
+        // Start where it was, then glide to where it is now.
+        moved = true;
+        grp.style.transform = `translate(${was.x}px,${was.y}px)`;
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            grp.classList.add("glide");
+            grp.style.transform = `translate(${now.x}px,${now.y}px)`;
+          }),
+        );
+      }
+    }
+    for (const n of chart.nodes) {
+      const before = prev.inside.get(n.id);
+      if (before !== undefined && (n.children?.nodes.length ?? 0) > before) this.nodeEls.get(n.id)?.classList.add("filled");
+    }
+    let freshEdges = 0;
+    for (const [id, path] of this.edgePaths) {
+      const grp = path.parentElement as unknown as SVGGElement;
+      if (prev.edges.has(id)) {
+        // Its route changed with the layout: fade it in rather than jump. Unchanged layouts don't flicker.
+        if (moved) grp.classList.add("reflow");
+        continue;
+      }
+      grp.classList.add("appear");
+      // The arrow head shows once the line has reached it.
+      path.addEventListener("animationend", () => grp.classList.remove("appear"), { once: true });
+      grp.style.setProperty("--len", String(Math.ceil(path.getTotalLength()) + 2));
+      grp.style.setProperty("--delay", `${fresh * STAGGER + 250 + freshEdges++ * 90}ms`);
+    }
   }
 
   private layoutGraph(chart: Chart, rankdir: "LR" | "TB") {
@@ -202,7 +278,10 @@ export class ChartView {
 
   private drawNode(n: Bubble, p: { x: number; y: number; width: number; height: number }) {
     const { width: w, height: h } = p;
-    const grp = el("g", { class: `node ${n.kind} ${n.status}${n.gui ? " gui" : ""}`, transform: `translate(${p.x - w / 2},${p.y - h / 2})`, "data-id": n.id, tabindex: 0 }, this.nodesG);
+    const outer = el("g", { class: `node ${n.kind} ${n.status}${n.gui ? " gui" : ""}`, "data-id": n.id, tabindex: 0 }, this.nodesG);
+    outer.style.transform = `translate(${p.x - w / 2}px,${p.y - h / 2}px)`;
+    // The inner group carries the pop-in animation, so it can scale around its own centre.
+    const grp = el("g", { class: "node-inner" }, outer);
     this.nodeBoxes.set(n.id, { x: p.x - w / 2, y: p.y - h / 2, w, h });
     el("rect", { width: w, height: h, rx: n.kind === "module" ? 14 : h / 2, class: "body" }, grp);
     const kind = (n.kind === "module" ? "MODULE" : n.status === "draft" ? "DRAFT" : "FUNCTION") + (n.gui ? " · UI" : "");
@@ -212,7 +291,7 @@ export class ChartView {
     el("text", { x: w / 2, y: n.kind === "module" ? 68 : 57, class: "io", "text-anchor": "middle" }, grp).textContent = io;
     el("title", {}, grp).textContent = `${n.name}\n${n.description}${n.kind === "module" ? "\n\nDouble-click to open" : ""}`;
 
-    grp.addEventListener("click", (e) => {
+    outer.addEventListener("click", (e) => {
       e.stopPropagation();
       if (this.connectFrom && this.connectFrom !== n.id) {
         const from = this.connectFrom;
@@ -222,30 +301,32 @@ export class ChartView {
       }
       this.cb.onSelect(n.id);
     });
-    grp.addEventListener("dblclick", (e) => {
+    outer.addEventListener("dblclick", (e) => {
       e.stopPropagation();
       if (n.kind === "module") this.cb.onOpen(n.id);
     });
-    grp.addEventListener("keydown", (e) => {
+    outer.addEventListener("keydown", (e) => {
       if (e.key === "Enter") n.kind === "module" ? this.cb.onOpen(n.id) : this.cb.onSelect(n.id);
     });
-    this.nodeEls.set(n.id, grp);
+    this.nodeEls.set(n.id, outer);
   }
 
   private drawGhost(ref: string, p: { x: number; y: number; width: number; height: number }) {
     const { width: w, height: h } = p;
-    const grp = el("g", { class: "node ghost", transform: `translate(${p.x - w / 2},${p.y - h / 2})`, "data-id": ref }, this.nodesG);
+    const outer = el("g", { class: "node ghost", "data-id": ref }, this.nodesG);
+    outer.style.transform = `translate(${p.x - w / 2}px,${p.y - h / 2}px)`;
+    const grp = el("g", { class: "node-inner" }, outer);
     this.nodeBoxes.set(ref, { x: p.x - w / 2, y: p.y - h / 2, w, h });
     el("rect", { width: w, height: h, rx: h / 2, class: "body" }, grp);
     const [mod, fn] = ref.includes("/") ? ref.split("/") : ["", ref];
     el("text", { x: w / 2, y: 19, class: "kind", "text-anchor": "middle" }, grp).textContent = mod ? `IN ${this.cb.ghostLabel(mod).toUpperCase()}` : "ELSEWHERE";
     el("text", { x: w / 2, y: 36, class: "name", "text-anchor": "middle" }, grp).textContent = truncate(this.cb.ghostLabel(ref) || fn, 22);
     el("title", {}, grp).textContent = `Lives in another module. Click to open it.`;
-    grp.addEventListener("click", (e) => {
+    outer.addEventListener("click", (e) => {
       e.stopPropagation();
       this.cb.onGhost(ref);
     });
-    this.nodeEls.set(ref, grp);
+    this.nodeEls.set(ref, outer);
   }
 
   setSelected(id: string | null) {

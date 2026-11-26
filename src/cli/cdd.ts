@@ -80,7 +80,7 @@ async function main(argv: string[]) {
       if (!/^y(es)?$/i.test(a.trim())) return out("Nothing changed.");
     }
     if (info.kind === "code") log("Reading the code and drawing the chart…");
-    const r = await ws.openFolder(name);
+    const r = await ws.openFolder(name, { wait: true });
     ws.closeAll();
     out(`Opened as "${r.name}".${r.summary ? ` ${r.summary}` : ""}`);
     for (const w of r.warnings ?? []) log(`  ! ${w}`);

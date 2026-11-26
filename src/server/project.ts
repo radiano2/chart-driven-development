@@ -240,21 +240,89 @@ export class Project {
     });
   }
 
-  /** Read the code already in the folder and draw its chart (for a codebase opened from disk). One commit. */
-  drawFromCode(): Promise<{ chart: ProjectChart; summary: string; warnings: string[] }> {
+  /** The running job that draws this project's chart from its code, if any. */
+  drawing: Promise<DrawResult> | null = null;
+
+  /**
+   * Draw the chart of the code already in the folder, in the background: modules first, then each module's
+   * functions. The chart is saved (and sent as a "chart" event) after every step, so the board fills in as
+   * the AI finds things; it's committed once, at the end. Ends with a "drawn" or "draw-failed" event.
+   */
+  startDrawing(): Promise<DrawResult> {
+    if (this.drawing) return this.drawing;
+    const job = this.drawFromCode().then(
+      (r) => {
+        this.emit({ type: "drawn", ...r });
+        return r;
+      },
+      async (e: unknown) => {
+        await this.discardUnfinishedChart();
+        this.emit({ type: "draw-failed", message: (e as Error).message });
+        throw e;
+      },
+    );
+    this.drawing = job.finally(() => (this.drawing = null));
+    this.drawing.catch(() => undefined); // failures are reported as events; callers that await still see them
+    return this.drawing;
+  }
+
+  private drawFromCode(): Promise<DrawResult> {
     return this.exclusive(async () => {
+      const folder = path.basename(this.dir);
       const all = await git.listFiles(this.dir);
+      const known = new Set(all);
       const { tree, files, omitted } = await selectSources(this.dir, all);
-      this.progress(`Reading ${files.length} file(s) and drawing the chart…`);
-      const imported = await this.ai.chartFromCode({ folder: path.basename(this.dir), tree, files, omitted });
-      if (!imported.root.nodes.length) throw new HttpError(502, "The AI couldn't draw a chart from this code. Try again.");
-      const warnings = dropMissingFiles(imported.root, new Set(all));
-      const pc: ProjectChart = { version: 1, name: this.name, idea: imported.idea || `The existing project in ${path.basename(this.dir)}`, stack: imported.stack, root: imported.root };
+      const pc: ProjectChart = { version: 1, name: this.name, idea: "Reading the code…", stack: null, root: { nodes: [], edges: [] }, drawing: true };
       await this.saveChart(pc);
-      await this.commit(`Draw chart from the existing code\n\n${imported.summary}`);
+      this.progress(`Reading ${files.length} file(s) to find the modules…`);
+      const top = await this.ai.chartModules({ folder, tree, files, omitted });
+      if (!top.root.nodes.length) throw new HttpError(502, "The AI couldn't find any modules in this code. Try again.");
+      pc.idea = top.idea || `The existing project in ${folder}`;
+      pc.stack = top.stack;
+      pc.root = top.root;
+      const warnings = dropMissingFiles(pc.root.nodes, known);
+      await this.saveChart(pc);
+
+      const mods = pc.root.nodes;
+      for (const [i, m] of mods.entries()) {
+        this.progress(`Drawing ${m.name} (${i + 1} of ${mods.length})…`);
+        let own = (top.files[m.id] ?? []).map(cleanRel).filter((f) => known.has(f));
+        if (!own.length && m.file) {
+          const dir = path.posix.dirname(m.file);
+          own = dir === "." ? [m.file] : all.filter((f) => f.startsWith(dir + "/"));
+        }
+        try {
+          if (!own.length) throw new Error("no files of its own were found");
+          const sel = await selectSources(this.dir, own, 70_000);
+          const inner = await this.ai.chartModule({ folder, chart: pc, module: m, files: sel.files });
+          warnings.push(...dropMissingFiles(inner.nodes, known));
+          m.children = inner;
+        } catch (e) {
+          if (e instanceof HttpError && e.status === 400) throw e; // e.g. no API key: stop rather than repeat it per module
+          warnings.push(`${m.name}: its functions couldn't be drawn (${(e as Error).message}). Select it and ask the AI to fill it in.`);
+          m.children = { nodes: [], edges: [] };
+        }
+        await this.saveChart(pc);
+      }
+      delete pc.drawing;
+      await this.saveChart(pc);
+      await this.commit(`Draw chart from the existing code\n\n${top.summary}`);
       this.progress("Done");
-      return { chart: pc, summary: imported.summary, warnings };
+      return { chart: pc, summary: top.summary, warnings };
     });
+  }
+
+  /** After a failed drawing, remove the half-drawn chart, unless .chart was already in git (then git has the real one). */
+  private async discardUnfinishedChart() {
+    try {
+      if ((await git.git(this.dir, ["ls-files", "--", ".chart"])).trim()) {
+        await git.git(this.dir, ["checkout", "--", ".chart"]);
+      } else {
+        await rm(path.join(this.dir, ".chart"), { recursive: true, force: true });
+      }
+    } catch {
+      /* leave it; the next open shows it as unfinished */
+    }
   }
 
   // ---------- AI-driven changes ----------
@@ -455,22 +523,35 @@ export class Project {
   }
 }
 
+const cleanRel = (f: string) => f.replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+
 /** Bubbles drawn from existing code may name files that don't exist; drop those links rather than point at nothing. */
-function dropMissingFiles(root: Chart, known: Set<string>): string[] {
+function dropMissingFiles(nodes: Bubble[], known: Set<string>): string[] {
   const warnings: string[] = [];
-  const check = (b: Bubble) => {
-    if (b.file) b.file = b.file.replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+  for (const b of nodes) {
+    if (b.file) b.file = cleanRel(b.file);
     if (b.file && !known.has(b.file)) {
       warnings.push(`${b.name}: the AI named a file that doesn't exist (${b.file}), so it isn't linked.`);
       delete b.file;
       delete b.symbol;
     }
-  };
-  for (const m of root.nodes) {
-    check(m);
-    for (const f of m.children?.nodes ?? []) check(f);
   }
   return warnings;
+}
+
+export interface OpenResult {
+  name: string;
+  chart: ProjectChart;
+  /** The chart is still being drawn; it arrives step by step as project events. */
+  drawing: boolean;
+  summary?: string;
+  warnings?: string[];
+}
+
+export interface DrawResult {
+  chart: ProjectChart;
+  summary: string;
+  warnings: string[];
 }
 
 function mergeFiles(a: FileChange[], b: FileChange[]): FileChange[] {
@@ -500,7 +581,9 @@ interface LinkedEntry {
 export class Workspace {
   private open = new Map<string, Project>();
   private links: LinkedEntry[] | null = null;
-  private opening = new Map<string, Promise<{ name: string; chart: ProjectChart; summary?: string; warnings?: string[] }>>();
+  private opening = new Map<string, Promise<OpenResult>>();
+  /** The latest drawing job per project name, for callers that wait for it. */
+  private jobs = new Map<string, Promise<DrawResult>>();
   readonly registry: string;
 
   constructor(readonly root: string, readonly ai: AI, readonly options: WorkspaceOptions = {}) {
@@ -686,7 +769,12 @@ export class Workspace {
   }
 
   /** Open a folder from disk: link a chart project, or read a plain codebase and draw its chart. */
-  async openFolder(input: string): Promise<{ name: string; chart: ProjectChart; summary?: string; warnings?: string[] }> {
+  /**
+   * Open a folder from disk: link a chart project, or start drawing the chart of a plain codebase. By default this
+   * returns as soon as the project can be shown (`drawing: true`) and the chart fills in through project events;
+   * `wait` returns when the drawing is done instead (the CLI).
+   */
+  async openFolder(input: string, opts: { wait?: boolean } = {}): Promise<OpenResult> {
     const info = await this.inspect(input);
     if (info.blocked) throw new HttpError(400, info.blocked);
     // Opening the same folder twice at once (double click) shares one import.
@@ -694,14 +782,20 @@ export class Workspace {
     if (pending) return pending;
     const job = this.openInspected(info).finally(() => this.opening.delete(info.path));
     this.opening.set(info.path, job);
-    return job;
+    const r = await job;
+    const drawingJob = this.jobs.get(r.name);
+    if (opts.wait && r.drawing && drawingJob) {
+      const done = await drawingJob;
+      return { name: r.name, drawing: false, ...done };
+    }
+    return r;
   }
 
-  private async openInspected(info: FolderInspection) {
+  private async openInspected(info: FolderInspection): Promise<OpenResult> {
     const dir = info.path;
     if (info.known) {
       const p = this.get(info.name);
-      return { name: p.name, chart: await p.loadChart() };
+      return { name: p.name, chart: await p.loadChart(), drawing: !!p.drawing };
     }
     // A remembered folder that isn't there any more and had this name was most likely moved here: let this one take its name.
     const base = slug(path.basename(dir) || "project").slice(0, 60);
@@ -722,7 +816,7 @@ export class Workspace {
     }
   }
 
-  private async link(info: FolderInspection) {
+  private async link(info: FolderInspection): Promise<OpenResult> {
     const dir = info.path;
     if (!info.git.repo) {
       await git.init(dir);
@@ -730,18 +824,52 @@ export class Workspace {
       await git.commitAll(dir, "Before Chart Driven Development: the existing files");
     }
     const p = new Project(dir, info.name, this.ai);
-    let result: { name: string; chart: ProjectChart; summary?: string; warnings?: string[] };
-    if (info.kind === "chart") {
-      result = { name: info.name, chart: await p.loadChart() };
-    } else {
-      const imported = await p.drawFromCode();
-      result = { name: info.name, ...imported };
+    if (info.kind === "code") {
+      // An empty board to show right away; the drawing job fills it in and commits it at the end.
+      await p.saveChart({ version: 1, name: info.name, idea: "Reading the code…", stack: null, root: { nodes: [], edges: [] }, drawing: true });
     }
     this.linked().push({ name: info.name, dir });
     this.saveLinks();
     this.open.set(info.name, p);
     p.watch();
-    return result;
+    if (info.kind === "code") {
+      // If drawing fails, the half-drawn chart is removed and the folder leaves the list (open it again to retry).
+      this.jobs.set(info.name, this.draw(info.name, p));
+      return { name: info.name, chart: await p.loadChart(), drawing: true };
+    }
+    return { name: info.name, chart: await p.loadChart(), drawing: false };
+  }
+
+  private unlink(name: string, p: Project) {
+    const links = this.linked();
+    const i = links.findIndex((l) => l.name === name && l.dir === p.dir);
+    if (i >= 0) {
+      links.splice(i, 1);
+      this.saveLinks();
+    }
+    if (this.open.get(name) === p) {
+      p.close();
+      this.open.delete(name);
+    }
+  }
+
+  private draw(name: string, p: Project): Promise<DrawResult> {
+    const job = p.startDrawing();
+    job.catch(() => this.unlink(name, p));
+    return job;
+  }
+
+  /** Draw again a chart whose drawing was cut short (the app stopped in the middle of it). */
+  async redraw(name: string): Promise<{ ok: true }> {
+    const p = this.get(name);
+    if (!p.drawing) {
+      if (!(await p.loadChart()).drawing) throw new HttpError(400, "This chart is finished. To change it, select a bubble and ask the AI.");
+      // Drawing commits the folder at the end; don't sweep edits made since then into that commit.
+      const changed = (await git.changedFiles(p.dir)).filter((f) => !f.startsWith(".chart/"));
+      if (changed.length) throw new HttpError(409, `${changed.length} file${changed.length === 1 ? " was" : "s were"} changed since the drawing stopped. Commit or stash ${changed.length === 1 ? "it" : "them"} first, then draw it again.`);
+      this.jobs.set(name, this.draw(name, p));
+    }
+    return { ok: true };
   }
 
   /** Search the computer (read-only) for project folders that match a description. */

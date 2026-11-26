@@ -37,6 +37,8 @@ interface State {
   history: boolean;
   assistant: boolean;
   outside: string[];
+  /** The chart of an opened codebase is being drawn right now (it grows on the board step by step). */
+  drawingChart: boolean;
   /** Design panel open. */
   design: boolean;
   designData: DesignState | null;
@@ -59,6 +61,7 @@ const state: State = {
   history: false,
   assistant: false,
   outside: [],
+  drawingChart: false,
   design: false,
   designData: null,
   designDraft: "",
@@ -157,6 +160,11 @@ function show(page: "home" | "stack-page" | "workspace" | "settings-page") {
 async function goHome() {
   events?.close();
   events = null;
+  // Leaving a chart that's still being drawn: it keeps drawing, and opening the project again shows where it got to.
+  if (state.drawingChart) {
+    state.drawingChart = false;
+    setBusy(null);
+  }
   state.project = null;
   state.chart = null;
   history.replaceState(null, "", "/");
@@ -211,7 +219,17 @@ function onServerEvent(project: string, ev: ServerEvent) {
     if (!$("stack-page").hidden && ev.message !== "Done") log.append(h("li", {}, ev.message));
   } else if (ev.type === "chart") {
     state.chart = ev.chart;
-    if (!$("workspace").hidden) renderChart(true);
+    if (!$("workspace").hidden) renderChart(true, true);
+  } else if (ev.type === "drawn") {
+    state.chart = ev.chart;
+    stopDrawingUi();
+    if (!$("workspace").hidden) renderChart(true, true);
+    const extra = ev.warnings.length ? ` ${ev.warnings.length} note${ev.warnings.length === 1 ? "" : "s"}: ${ev.warnings.slice(0, 2).join(" ")}${ev.warnings.length > 2 ? " …" : ""}` : "";
+    toast(`The chart is drawn. ${ev.summary} Double-click a module to open it.${extra}`, ev.warnings.length ? "error" : "info");
+  } else if (ev.type === "draw-failed") {
+    stopDrawingUi();
+    toast(`Couldn't draw the chart: ${ev.message} The half-drawn chart was removed and your code wasn't touched. Open the folder again to retry.`, "error");
+    void goHome();
   } else if (ev.type === "design") {
     state.designData = ev.design;
     if (!$("workspace").hidden) renderPanel();
@@ -261,9 +279,37 @@ async function openProject(name: string) {
       if (!$("workspace").hidden) renderPanel();
     })
     .catch(() => undefined);
-  if (!data.chart.root.nodes.length) return startStackChoice(name, data.chart.idea);
+  if (!data.chart.root.nodes.length && !data.drawing && !data.chart.drawing) return startStackChoice(name, data.chart.idea);
   history.replaceState(null, "", `/?p=${encodeURIComponent(name)}`);
+  state.drawingChart = data.drawing;
   enterWorkspace();
+  if (data.drawing) startDrawingUi();
+}
+
+/** While the chart of an opened codebase is drawn: the board grows live, and editing waits until it's done. */
+function startDrawingUi() {
+  const name = state.project;
+  state.drawingChart = true;
+  setBusy("Reading the code…");
+  renderChart(true);
+  // Events only flow from when we subscribed: if the drawing ended just before that, catch up now.
+  if (name)
+    api
+      .open(name)
+      .then((d) => {
+        if (state.project !== name || !state.drawingChart || d.drawing) return;
+        state.chart = d.chart;
+        stopDrawingUi();
+        renderChart(true, true);
+      })
+      .catch(() => undefined);
+}
+
+function stopDrawingUi() {
+  if (!state.drawingChart) return;
+  state.drawingChart = false;
+  setBusy(null);
+  renderBanner();
 }
 
 function enterWorkspace() {
@@ -329,17 +375,24 @@ function currentBubble(): Bubble | undefined {
   return currentChart()?.nodes.find((n) => n.id === state.selected);
 }
 
-function renderChart(keepView = false) {
+function renderChart(keepView = false, animate = false) {
   const chart = currentChart();
   if (!chart) {
     state.level = "root";
     return renderChart();
   }
-  view.render(chart, { keepView });
+  // While the chart is being drawn, keep the whole (growing) level in view.
+  view.render(chart, { keepView, animate, key: `${state.project}/${state.level}`, glide: animate && state.drawingChart });
+  const empty = $("empty-level");
+  if (state.drawingChart && !chart.nodes.length) {
+    empty.replaceChildren(h("span", { class: "drawing-note" }, h("span", { class: "spinner" }), state.level === "root" ? "Reading your code. Modules appear here as they're found." : "This module's functions appear here as soon as they're drawn."));
+  } else {
+    empty.replaceChildren("This module is empty. Use ", h("b", {}, "＋ Bubble"), " to draw its first function.");
+  }
   if (state.selected && !chart.nodes.some((n) => n.id === state.selected)) state.selected = null;
   view.setSelected(state.selected);
   $("btn-up").hidden = state.level === "root";
-  $("empty-level").hidden = chart.nodes.length > 0;
+  empty.hidden = chart.nodes.length > 0;
   renderCrumbs();
   renderPanel();
 }
@@ -348,7 +401,7 @@ function applyResult(r: ChangeResult, bubbleId: string | null) {
   state.chart = r.chart;
   state.rec = null;
   state.lastResult = r.summary ? { bubbleId, text: r.summary, files: r.files ?? [] } : null;
-  renderChart(true);
+  renderChart(true, true);
   if (r.warnings?.length) toast(`Some changes were skipped: ${r.warnings.join("; ")}`, "error");
 }
 
@@ -692,6 +745,31 @@ function historyPanel() {
 
 function renderBanner() {
   const b = $("outside-banner");
+  if (state.project && state.chart?.drawing && !state.drawingChart) {
+    // The app stopped while this chart was being drawn.
+    const name = state.project;
+    b.hidden = false;
+    b.replaceChildren(
+      h("span", {}, h("strong", {}, "This chart wasn't finished"), ": the app stopped while it was being drawn from the code."),
+      h(
+        "button",
+        {
+          class: "primary ai",
+          onclick: async () => {
+            try {
+              await api.redraw(name);
+              startDrawingUi();
+              renderBanner();
+            } catch (e) {
+              toast((e as Error).message, "error");
+            }
+          },
+        },
+        "Draw it again",
+      ),
+    );
+    return;
+  }
   const files = state.outside;
   b.hidden = !files.length || !state.project;
   if (b.hidden) return;
@@ -871,16 +949,12 @@ function inspectionCard(info: FolderInspection) {
 }
 
 async function openFolder(info: FolderInspection) {
-  const label = info.kind === "code" ? "Reading the code and drawing the chart…" : "Opening project…";
+  const label = info.kind === "code" ? "Starting…" : "Opening project…";
   const r = await guard(label, () => api.openPath(info.path));
   if (!r) return;
   closeOpenResult();
   ($("open-path") as HTMLInputElement).value = "";
   await openProject(r.name);
-  if (info.kind === "code") {
-    const extra = r.warnings?.length ? ` ${r.warnings.length} bubble(s) named files that don't exist and were left unlinked.` : "";
-    toast(`${r.summary ?? "The chart is drawn from your code."} Double-click a module to open it.${extra}`);
-  }
 }
 
 function findResults(r: FindResult) {
