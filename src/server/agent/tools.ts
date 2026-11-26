@@ -122,7 +122,8 @@ function runArgv(cmd: string, cwd: string, timeoutMs = 120_000): Promise<string>
   return new Promise((resolve) => {
     execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, shell: process.platform === "win32" }, (err, stdout, stderr) => {
       const code = err ? ((err as { code?: number | string }).code ?? "error") : 0;
-      resolve(`exit code: ${code}\n${tail(String(stdout) + (stderr ? `\n[stderr]\n${stderr}` : ""))}`);
+      const killed = (err as { killed?: boolean } | null)?.killed ? " (timed out)" : "";
+      resolve(`exit code: ${code}${killed}\n${tail(String(stdout) + (stderr ? `\n[stderr]\n${stderr}` : ""))}`);
     });
   });
 }

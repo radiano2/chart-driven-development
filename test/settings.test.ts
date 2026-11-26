@@ -113,6 +113,8 @@ describe("settings API", () => {
     assert.equal((await fetch(`${base}/api/projects/%E0%A4%A`)).status, 400);
     const form = await fetch(`${base}/api/settings/test`, { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" });
     assert.equal(form.status, 415);
+    const notObject = await json("PUT", "/api/settings", null);
+    assert.equal(notObject.status, 400);
     // fetch() won't let us fake the Host header, so use a raw request (a DNS-rebinding page would send this).
     const rebind = await new Promise<number>((resolve, reject) =>
       http.get(`${base}/api/info`, { headers: { host: "evil.example" } }, (r) => (r.resume(), resolve(r.statusCode!))).on("error", reject),

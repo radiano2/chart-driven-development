@@ -8,6 +8,10 @@ export interface JsonLLM {
 export const DEEPSEEK_MODEL = "deepseek-flash";
 /** Flash thinks before it answers, and the thinking counts toward max_tokens, so leave plenty of room. */
 const MAX_TOKENS = 32_000;
+/** Added on top of a caller's answer budget, so thinking can't use up a small limit (e.g. 2000) before the answer. */
+const THINKING_ROOM = 16_000;
+/** Thinking plus a long answer can take minutes. */
+const TIMEOUT_MS = 600_000;
 
 export interface DeepSeekOptions {
   apiKey: string;
@@ -26,13 +30,13 @@ export class DeepSeek implements JsonLLM {
     this.apiKey = opts.apiKey;
     this.model = opts.model || DEEPSEEK_MODEL;
     this.baseUrl = (opts.baseUrl || "https://api.deepseek.com").replace(/\/+$/, "");
-    this.timeoutMs = opts.timeoutMs ?? 240_000;
+    this.timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
   }
 
   async json(system: string, user: string, opts: { maxTokens?: number } = {}): Promise<unknown> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const content = await this.chat(system, user, opts.maxTokens ?? MAX_TOKENS);
+      const content = await this.chat(system, user, opts.maxTokens ? opts.maxTokens + THINKING_ROOM : MAX_TOKENS);
       try {
         return parseJsonLoose(content);
       } catch (e) {
@@ -64,8 +68,8 @@ export class DeepSeek implements JsonLLM {
     const data = (await res.json()) as { choices?: { message?: { content?: string }; finish_reason?: string }[] };
     const choice = data.choices?.[0];
     const content = choice?.message?.content;
-    if (!content) throw new Error("DeepSeek returned an empty response");
     if (choice?.finish_reason === "length") throw new Error("DeepSeek response was cut off (too long). Try a smaller change.");
+    if (!content) throw new Error("DeepSeek returned an empty response");
     return content;
   }
 }
@@ -123,7 +127,7 @@ export class DeepSeekTools implements ToolLLM {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify({ model: this.model, messages, tools, max_tokens: MAX_TOKENS }),
-      signal: AbortSignal.timeout(240_000),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");

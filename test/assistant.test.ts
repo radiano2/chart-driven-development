@@ -334,3 +334,15 @@ describe("DeepSeek flash", () => {
     }
   });
 });
+
+describe("outside edits", () => {
+  it("names changed files exactly, including spaces and non-ASCII", async () => {
+    const git = await import("../src/server/git.ts");
+    await writeFile(path.join(project.dir, "notes été.md"), "hi\n");
+    try {
+      assert.ok((await git.changedFiles(project.dir)).includes("notes été.md"));
+    } finally {
+      await rm(path.join(project.dir, "notes été.md"));
+    }
+  });
+});

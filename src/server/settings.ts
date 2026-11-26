@@ -38,7 +38,9 @@ export class SettingsStore {
 
   load() {
     try {
-      this.data = existsSync(this.file) ? (JSON.parse(readFileSync(this.file, "utf8")) as Settings) : {};
+      const raw: unknown = existsSync(this.file) ? JSON.parse(readFileSync(this.file, "utf8")) : {};
+      const key = raw && typeof raw === "object" ? (raw as Settings).deepseekApiKey : undefined;
+      this.data = typeof key === "string" && key ? { deepseekApiKey: key } : {};
     } catch {
       this.data = {};
     }
