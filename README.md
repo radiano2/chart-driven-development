@@ -15,6 +15,8 @@ Then click **⚙ Settings** (top right), paste your DeepSeek API key and press *
 The key is stored only on this computer in `.cdd/settings.json` (git-ignored, readable only by you) and is never sent back to the browser.
 `DEEPSEEK_API_KEY` in `.env` still works too; a key saved in Settings takes priority. From a terminal: `npm run cdd -- set-key` (typed hidden). Only a key DeepSeek rejects (401) is refused; if the account has no balance or DeepSeek can't be reached, the key is saved with a warning.
 
+The app uses **DeepSeek flash** (`deepseek-flash`) only; there is no model setting. Flash thinks before it answers, and the assistant sends that thinking back on each tool step, as DeepSeek requires.
+
 No API key yet? `npm run start:mock` runs the whole flow offline with a canned "todo app" so you can click around.
 
 Requires Node 20+ and git.

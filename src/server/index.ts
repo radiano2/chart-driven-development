@@ -1,5 +1,5 @@
 // Local web server: JSON API + server-sent events + static UI. Binds to 127.0.0.1 only.
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -65,11 +65,14 @@ async function body(req: http.IncomingMessage, limit = 2_000_000): Promise<Recor
     if (raw.length > limit) throw new HttpError(413, "Request too large");
   }
   if (!raw) return {};
+  let data: unknown;
   try {
-    return JSON.parse(raw);
+    data = JSON.parse(raw);
   } catch {
     throw new HttpError(400, "Invalid JSON");
   }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new HttpError(400, "Send a JSON object");
+  return data as Record<string, unknown>;
 }
 
 function send(res: http.ServerResponse, status: number, data: unknown) {
@@ -110,10 +113,7 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
         if (parts.length === 2 && method === "GET") return send(res, 200, brain.settings.status());
         if (parts.length === 2 && method === "PUT") {
           const b = await body(req);
-          const patch: { deepseekApiKey?: string; deepseekModel?: string } = {};
-          if (typeof b.deepseekApiKey === "string") patch.deepseekApiKey = b.deepseekApiKey;
-          if (typeof b.deepseekModel === "string") patch.deepseekModel = b.deepseekModel;
-          brain.update(patch);
+          brain.update(typeof b.deepseekApiKey === "string" ? { deepseekApiKey: b.deepseekApiKey } : {});
           return send(res, 200, { ...brain.settings.status(), ai: brain.label });
         }
         if (parts.length === 3 && parts[2] === "test" && method === "POST") {
@@ -164,8 +164,11 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
         switch (action) {
           case "stack":
             return send(res, 200, await p.proposeStack());
-          case "generate":
+          case "generate": {
+            const stack = b.stack as { name?: unknown } | undefined;
+            if (!stack || typeof stack !== "object" || typeof stack.name !== "string") throw new HttpError(400, 'Missing "stack"');
             return send(res, 200, { chart: await p.generate(b.stack as never) });
+          }
           case "recommend":
             return send(res, 200, await p.recommend(level, str(b.bubbleId, "bubbleId"), str(b.request, "request")));
           case "apply":
@@ -247,7 +250,7 @@ function streamEvents(events: NodeJS.EventEmitter, req: http.IncomingMessage, re
 async function serveStatic(pathname: string, res: http.ServerResponse) {
   const rel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   const abs = path.resolve(PUBLIC, rel);
-  if (!abs.startsWith(PUBLIC + path.sep) || !existsSync(abs)) throw new HttpError(404, "Not found");
+  if (!abs.startsWith(PUBLIC + path.sep) || !existsSync(abs) || !statSync(abs).isFile()) throw new HttpError(404, "Not found");
   res.writeHead(200, { "content-type": MIME[path.extname(abs)] ?? "application/octet-stream" });
   res.end(await readFile(abs));
 }

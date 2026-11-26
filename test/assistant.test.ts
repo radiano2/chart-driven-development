@@ -299,3 +299,50 @@ describe("cdd CLI", () => {
     await assert.rejects(cli(["chart", "nope"]), /No project "nope"/);
   });
 });
+
+describe("DeepSeek flash", () => {
+  it("uses deepseek-flash and sends its thinking back on later tool requests", async () => {
+    const http = await import("node:http");
+    const { DeepSeekTools } = await import("../src/server/ai/deepseek.ts");
+    const bodies: { model: string; messages: Record<string, unknown>[] }[] = [];
+    // Behaves like DeepSeek with tools in thinking mode: an earlier assistant message without reasoning_content is a 400.
+    const fake = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (d) => (raw += d));
+      req.on("end", () => {
+        const b = JSON.parse(raw);
+        bodies.push(b);
+        if (b.messages.some((m: Record<string, unknown>) => m.role === "assistant" && !m.reasoning_content))
+          return res.writeHead(400).end('{"error":"reasoning_content missing"}');
+        const first = bodies.length === 1;
+        const message = first
+          ? { content: null, reasoning_content: "Look at the project first.", tool_calls: [{ id: "t1", type: "function", function: { name: "get_project", arguments: "{}" } }] }
+          : { content: "It is a todo app.", reasoning_content: "Got it." };
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [{ message }] }));
+      });
+    });
+    await new Promise<void>((r) => fake.listen(0, "127.0.0.1", r));
+    try {
+      const port = (fake.address() as import("node:net").AddressInfo).port;
+      const llm = new DeepSeekTools({ apiKey: "sk-x", baseUrl: `http://127.0.0.1:${port}` });
+      const r = await new Assistant(project, llm, { approve: async () => false }).ask("what is this?");
+      assert.equal(r.reply, "It is a todo app.");
+      assert.deepEqual(bodies.map((b) => b.model), ["deepseek-flash", "deepseek-flash"]);
+      assert.equal(bodies[1].messages.find((m) => m.role === "assistant")?.reasoning_content, "Look at the project first.");
+    } finally {
+      fake.close();
+    }
+  });
+});
+
+describe("outside edits", () => {
+  it("names changed files exactly, including spaces and non-ASCII", async () => {
+    const git = await import("../src/server/git.ts");
+    await writeFile(path.join(project.dir, "notes été.md"), "hi\n");
+    try {
+      assert.ok((await git.changedFiles(project.dir)).includes("notes été.md"));
+    } finally {
+      await rm(path.join(project.dir, "notes été.md"));
+    }
+  });
+});

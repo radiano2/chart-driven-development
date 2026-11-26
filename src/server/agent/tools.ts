@@ -169,7 +169,8 @@ function runArgv(cmd: string, cwd: string, timeoutMs = 120_000): Promise<string>
   return new Promise((resolve) => {
     execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, shell: process.platform === "win32" }, (err, stdout, stderr) => {
       const code = err ? ((err as { code?: number | string }).code ?? "error") : 0;
-      resolve(`exit code: ${code}\n${tail(String(stdout) + (stderr ? `\n[stderr]\n${stderr}` : ""))}`);
+      const killed = (err as { killed?: boolean } | null)?.killed ? " (timed out)" : "";
+      resolve(`exit code: ${code}${killed}\n${tail(String(stdout) + (stderr ? `\n[stderr]\n${stderr}` : ""))}`);
     });
   });
 }
@@ -264,7 +265,11 @@ export async function runTool(name: string, a: Args, ctx: ToolContext): Promise<
     }
     case "delete_file": {
       const rel = arg(a, "path");
-      await rm(safePath(p.dir, rel), { force: true });
+      const abs = safePath(p.dir, rel);
+      const s = await stat(abs).catch(() => null);
+      if (!s) throw new Error(`No such file: ${rel}`);
+      if (!s.isFile()) throw new Error(`${rel} is a folder; delete the files in it one by one`);
+      await rm(abs);
       ctx.changed.add(rel);
       return `Deleted ${rel}.`;
     }

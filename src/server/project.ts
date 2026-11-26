@@ -339,8 +339,10 @@ export class Project {
   async restoreUnlocked(sha: string, pendingMessage = "Save outside edits before restoring") {
     // Keep any uncommitted edits in history before replacing the working tree.
     await this.commit(pendingMessage);
+    // At least 4 hex characters, so a stray "a" can't pick some random version.
+    if (!/^[0-9a-f]{4,40}$/i.test(sha.trim())) throw new HttpError(400, "Invalid version id");
     const entries = await git.history(this.dir, 200);
-    const target = entries.find((e) => e.sha.startsWith(sha));
+    const target = entries.find((e) => e.sha.startsWith(sha.trim().toLowerCase()));
     if (!target) throw new HttpError(404, "Unknown version");
     await git.restore(this.dir, target.sha, `Restore: ${target.message.split("\n")[0]}`);
     const pc = await this.loadChart();

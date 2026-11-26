@@ -326,7 +326,7 @@ Return: { "description": "2 or 3 sentences describing the reference's style", "s
 The user asks for a mockup: "${ctx.request}"
 ${focus}
 Follow the design guide's mockup HTML rules and answer format exactly.`,
-      { maxTokens: 8000, images: ctx.referenceImages },
+      { maxTokens: 12_000, images: ctx.referenceImages },
     );
     return normMockup(raw, allBubbleIds(ctx.chart));
   }

@@ -50,7 +50,7 @@ export interface ChangeResult {
 export const api = {
   info: () => call<{ ai: string; workspace: string; needsKey: boolean }>("GET", "/api/info"),
   settings: () => call<SettingsStatus>("GET", "/api/settings"),
-  saveSettings: (patch: { deepseekApiKey?: string; deepseekModel?: string }) => call<SettingsStatus & { ai: string }>("PUT", "/api/settings", patch),
+  saveSettings: (patch: { deepseekApiKey?: string }) => call<SettingsStatus & { ai: string }>("PUT", "/api/settings", patch),
   testKey: (deepseekApiKey?: string) => call<{ ok: boolean; invalid: boolean; message: string }>("POST", "/api/settings/test", { deepseekApiKey }),
   projects: () => call<ProjectSummary[]>("GET", "/api/projects"),
   create: (name: string, idea: string) => call<{ name: string; chart: ProjectChart }>("POST", "/api/projects", { name, idea }),
