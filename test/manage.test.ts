@@ -119,6 +119,8 @@ describe("run chat", () => {
     assert.match(r.data.answer, /why does it go to storage/);
     assert.equal((await call("POST", "/api/projects/runner/run/ask", { level: "root", question: "x" })).status, 400);
     assert.equal((await call("POST", "/api/projects/runner/run/ask", { level: "root", trace })).status, 400);
+    const junk = await call("POST", "/api/projects/runner/run/ask", { level: "root", trace: { scenario: 1, steps: [null, 5, { nodeId: "x" }] }, question: "ok?" });
+    assert.equal(junk.status, 200, "junk steps in the trace are dropped, not a crash");
   });
 
   it("keeps the AI's explanations, and copes without them", () => {

@@ -436,7 +436,7 @@ export class Project {
     // The trace comes back from the browser: keep it small.
     const small: RunTrace = {
       scenario: String(trace.scenario ?? "").slice(0, 300),
-      steps: trace.steps.slice(0, 20).map((s) => ({ nodeId: String(s.nodeId).slice(0, 120), data: String(s.data ?? "").slice(0, 200), note: String(s.note ?? "").slice(0, 300) })),
+      steps: trace.steps.filter((s) => s && typeof s === "object").slice(0, 20).map((s) => ({ nodeId: String(s.nodeId).slice(0, 120), data: String(s.data ?? "").slice(0, 200), note: String(s.note ?? "").slice(0, 300) })),
     };
     return this.ai.explainRun({ chart: pc, level, trace: small, history, question });
   }
@@ -694,6 +694,8 @@ export class Workspace {
     const open = this.open.get(name);
     if (open?.drawing) throw new HttpError(409, "Its chart is still being drawn. Wait for it to finish, then remove it.");
 
+    // Stop watching it first, so nothing polls a folder that's being moved or deleted.
+    open?.close();
     let message: string;
     if (opts.deleteFolder) {
       if (existsSync(dir)) {
@@ -719,7 +721,6 @@ export class Workspace {
       this.linked().splice(linkIdx, 1);
       this.saveLinks();
     }
-    open?.close();
     this.open.delete(name);
     this.jobs.delete(name);
     return { ok: true, message };

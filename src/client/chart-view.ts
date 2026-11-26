@@ -202,7 +202,10 @@ export class ChartView {
    */
   private enter(how: "in" | "out", from?: string) {
     const end = this.fitView();
-    if (!end) return this.fit();
+    if (!end) {
+      this.root.style.opacity = "1";
+      return this.fit();
+    }
     if (this.reducedMotion()) {
       this.view = end;
       this.root.style.opacity = "1";
