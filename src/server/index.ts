@@ -8,7 +8,9 @@ import type { ServerEvent } from "../shared/types.ts";
 import { AssistantHub } from "./agent/hub.ts";
 import { MockToolLLM } from "./agent/mock-llm.ts";
 import { runTool } from "./agent/tools.ts";
-import { HttpError, Workspace } from "./project.ts";
+import { Design } from "./design/design.ts";
+import { closeBrowser } from "./design/render.ts";
+import { HttpError, type Project, Workspace } from "./project.ts";
 import { Brain, SettingsStore } from "./settings.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -56,11 +58,11 @@ function checkLocalRequest(req: http.IncomingMessage) {
   }
 }
 
-async function body(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+async function body(req: http.IncomingMessage, limit = 2_000_000): Promise<Record<string, unknown>> {
   let raw = "";
   for await (const chunk of req) {
     raw += chunk;
-    if (raw.length > 2_000_000) throw new HttpError(413, "Request too large");
+    if (raw.length > limit) throw new HttpError(413, "Request too large");
   }
   if (!raw) return {};
   let data: unknown;
@@ -86,6 +88,12 @@ const str = (v: unknown, name: string): string => {
 export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = new AssistantHub(new MockToolLLM())) {
   const brain = typeof brainOrLabel === "string" ? null : brainOrLabel;
   const label = () => (brain ? brain.label : (brainOrLabel as string));
+  const designs = new WeakMap<Project, Design>();
+  const design = (p: Project) => {
+    let d = designs.get(p);
+    if (!d) designs.set(p, (d = new Design(p, ws.ai)));
+    return d;
+  };
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
@@ -139,11 +147,19 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
             return streamEvents(p.events, req, res);
           case "assistant":
             return send(res, 200, hub.transcript(p));
+          case "design":
+            return send(res, 200, await design(p).state());
+          case "design/image": {
+            const img = await design(p).image(str(url.searchParams.get("path"), "path"));
+            res.writeHead(200, { "content-type": img.mime, "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+            return res.end(img.bytes);
+          }
         }
       }
 
       if (method === "POST") {
-        const b = await body(req);
+        // Reference images are sent as data: URLs (up to 8 MB of image, so about 11 MB of base64).
+        const b = await body(req, action === "design/references" ? 12_000_000 : 2_000_000);
         const level = typeof b.level === "string" && b.level ? b.level : "root";
         switch (action) {
           case "stack":
@@ -186,6 +202,23 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
           case "assistant/reset":
             hub.get(p).reset();
             return send(res, 200, { ok: true });
+          case "design/references":
+            return send(res, 200, await design(p).addReference(str(b.image, "image"), typeof b.note === "string" ? b.note : ""));
+          case "design/references/remove":
+            return send(res, 200, await design(p).removeReference(str(b.id, "id")));
+          case "design/mockups":
+            return send(res, 200, await design(p).makeMockup(str(b.request, "request"), Array.isArray(b.bubbleIds) ? b.bubbleIds.map(String).slice(0, 20) : []));
+          case "design/mockups/remove":
+            return send(res, 200, await design(p).removeMockup(str(b.id, "id")));
+          case "design/apply":
+            return send(res, 200, await design(p).applyMockup(typeof b.id === "string" && b.id ? b.id : null));
+          case "design/gui":
+            return send(res, 200, await design(p).setGui(level, str(b.bubbleId, "bubbleId"), b.gui && typeof b.gui === "object" ? (b.gui as { route?: string; selector?: string }) : null));
+          case "design/app-url":
+            return send(res, 200, await design(p).setAppUrl(typeof b.url === "string" ? b.url : ""));
+          case "design/screenshot":
+            // The button says it starts the app if needed, so pressing it is the user's go-ahead.
+            return send(res, 200, await design(p).screenshot(level, str(b.bubbleId, "bubbleId"), true));
           case "open-folder":
             return send(res, 200, { message: await runTool("open_folder", {}, { project: p, approve: async () => false, changed: new Set(), pendingMessage: "" }) });
         }
@@ -225,6 +258,7 @@ async function serveStatic(pathname: string, res: http.ServerResponse) {
 async function main() {
   const cfg = setup();
   const port = Number(process.env.PORT) || 4317;
+  process.env.CDD_PORT = String(port);
   createServer(cfg.ws, cfg.brain, new AssistantHub(cfg.tools)).listen(port, "127.0.0.1", () => {
     console.log(`Chart Driven Development: http://localhost:${port}`);
     console.log(`AI: ${cfg.brain.label}   Projects folder: ${cfg.workspace}`);
@@ -232,6 +266,7 @@ async function main() {
   });
   process.on("SIGINT", () => {
     cfg.ws.closeAll();
+    void closeBrowser();
     process.exit(0);
   });
 }

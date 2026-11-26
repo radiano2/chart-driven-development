@@ -258,7 +258,8 @@ export class Project {
     });
   }
 
-  private async applyChangeSet(pc: ProjectChart, cs: ChangeSet, title: string) {
+  /** Apply AI changes (chart ops + files) and save them as one version. Call while holding the project lock. */
+  async applyChangeSet(pc: ProjectChart, cs: ChangeSet, title: string) {
     const warnings = applyOps(pc, cs.ops);
     await this.writeFiles(cs.files);
     await this.saveChart(pc);
@@ -426,7 +427,7 @@ function mergeFiles(a: FileChange[], b: FileChange[]): FileChange[] {
 export class Workspace {
   private open = new Map<string, Project>();
 
-  constructor(readonly root: string, private ai: AI) {}
+  constructor(readonly root: string, readonly ai: AI) {}
 
   async list(): Promise<ProjectSummary[]> {
     await mkdir(this.root, { recursive: true });

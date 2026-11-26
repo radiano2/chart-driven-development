@@ -1,5 +1,11 @@
 import type {
   Bubble,
+  DesignReference,
+  DesignState,
+  GuiInfo,
+  Mockup,
+  Screenshot,
+  StyleGuide,
   HistoryEntry,
   Level,
   ProjectChart,
@@ -74,6 +80,19 @@ export const api = {
   assistantTranscript: (name: string) => call<{ role: "user" | "assistant"; text: string }[]>("GET", `${P(name)}/assistant`),
   approve: (name: string, id: string, allow: boolean) => call<{ ok: boolean }>("POST", `${P(name)}/assistant/approve`, { id, allow }),
   resetAssistant: (name: string) => call<{ ok: boolean }>("POST", `${P(name)}/assistant/reset`),
+  design: (name: string) => call<DesignState>("GET", `${P(name)}/design`),
+  /** URL of an image in the project's design folder (path as stored, e.g. ".chart/design/mockups/…/mockup.png"). */
+  designImage: (name: string, stored: string, version = "") =>
+    `${P(name)}/design/image?path=${encodeURIComponent(stored.replace(/^\.chart\/design\//, ""))}${version ? `&v=${encodeURIComponent(version)}` : ""}`,
+  addReference: (name: string, image: string, note: string) =>
+    call<{ reference: DesignReference; style: StyleGuide; design: DesignState }>("POST", `${P(name)}/design/references`, { image, note }),
+  removeReference: (name: string, id: string) => call<DesignState>("POST", `${P(name)}/design/references/remove`, { id }),
+  mockup: (name: string, request: string, bubbleIds: string[]) => call<Mockup>("POST", `${P(name)}/design/mockups`, { request, bubbleIds }),
+  removeMockup: (name: string, id: string) => call<DesignState>("POST", `${P(name)}/design/mockups/remove`, { id }),
+  applyDesign: (name: string, id: string | null) => call<ChangeResult>("POST", `${P(name)}/design/apply`, { id }),
+  setGui: (name: string, level: Level, bubbleId: string, gui: GuiInfo | null) => call<ChangeResult>("POST", `${P(name)}/design/gui`, { level, bubbleId, gui }),
+  setAppUrl: (name: string, url: string) => call<DesignState>("POST", `${P(name)}/design/app-url`, { url }),
+  screenshot: (name: string, level: Level, bubbleId: string) => call<Screenshot>("POST", `${P(name)}/design/screenshot`, { level, bubbleId }),
   openFolder: (name: string) => call<{ message: string }>("POST", `${P(name)}/open-folder`),
   events(name: string, onEvent: (e: ServerEvent) => void): EventSource {
     const es = new EventSource(`${P(name)}/events`);

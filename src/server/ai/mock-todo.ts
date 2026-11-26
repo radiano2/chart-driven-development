@@ -7,6 +7,7 @@ export const TODO_STACK: Stack = {
   runtime: "Node.js 20+",
   libraries: [],
   runCommand: "npm start",
+  appUrl: "http://localhost:3000",
   reasoning: "A todo app needs a tiny HTTP API, a JSON file for storage and one web page. Node's built-in http module does it with zero dependencies.",
 };
 
@@ -39,14 +40,15 @@ export const TODO_CHART: Chart = {
       kind: "module",
       status: "ready",
       description: "The browser page: shows the list, lets the user add, tick off and delete todos.",
+      gui: { route: "/" },
       inputs: [port("todos", "Todo[]")],
       outputs: [port("request", "{ method, path, body? }")],
       file: "public/app.js",
       children: {
         nodes: [
           { id: "load-todos", name: "loadTodos", kind: "function", status: "ready", description: "Fetches all todos from the API and renders them.", inputs: [], outputs: [port("todos", "Todo[]")], file: "public/app.js", symbol: "loadTodos" },
-          { id: "render-todos", name: "renderTodos", kind: "function", status: "ready", description: "Draws the todo list into the page.", inputs: [port("todos", "Todo[]")], outputs: [port("html", "DOM list")], file: "public/app.js", symbol: "renderTodos" },
-          { id: "on-submit", name: "onSubmit", kind: "function", status: "ready", description: "Reads the new todo's title from the form and POSTs it.", inputs: [port("event", "SubmitEvent")], outputs: [port("todos", "Todo[]")], file: "public/app.js", symbol: "onSubmit" },
+          { id: "render-todos", name: "renderTodos", kind: "function", status: "ready", gui: { route: "/", selector: "#list" }, description: "Draws the todo list into the page.", inputs: [port("todos", "Todo[]")], outputs: [port("html", "DOM list")], file: "public/app.js", symbol: "renderTodos" },
+          { id: "on-submit", name: "onSubmit", kind: "function", status: "ready", gui: { route: "/", selector: "#new-todo" }, description: "Reads the new todo's title from the form and POSTs it.", inputs: [port("event", "SubmitEvent")], outputs: [port("todos", "Todo[]")], file: "public/app.js", symbol: "onSubmit" },
           { id: "on-toggle", name: "onToggle", kind: "function", status: "ready", description: "Marks a todo done / not done.", inputs: [port("id", "number")], outputs: [port("todos", "Todo[]")], file: "public/app.js", symbol: "onToggle" },
           { id: "on-delete", name: "onDelete", kind: "function", status: "ready", description: "Deletes a todo.", inputs: [port("id", "number")], outputs: [port("todos", "Todo[]")], file: "public/app.js", symbol: "onDelete" },
         ],
