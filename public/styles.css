@@ -253,3 +253,31 @@ input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--acc
 .settings-status .warn { background: var(--amber-soft); }
 .small.ok { color: var(--teal); }
 .key-banner { border-radius: var(--radius); margin-bottom: 20px; border: 1px solid var(--border); }
+
+/* ---------- design ---------- */
+.node.gui .kind { fill: var(--teal); }
+.shot { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); cursor: zoom-in; margin: 4px 0 6px; }
+.screen { margin: 14px 0; padding-top: 12px; border-top: 1px solid var(--border); }
+.screen textarea, .design textarea { width: 100%; margin-top: 6px; }
+.mock-crop { margin-top: 8px; }
+.gui-edit { margin-top: 8px; }
+.gui-edit summary { cursor: pointer; }
+.stack-form { display: grid; gap: 6px; margin-top: 6px; }
+.stack-form label, .design label { display: grid; gap: 2px; font-size: 12px; color: var(--muted); }
+.design .check { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
+.design > div, .design > form { margin-top: 16px; }
+.style-guide { padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; margin: 8px 0; }
+.swatch { display: grid; gap: 2px; font-size: 11px; }
+.swatch code { font-size: 11px; color: var(--muted); }
+.chip { display: block; height: 30px; border-radius: 6px; border: 1px solid var(--border); }
+.rules { margin: 4px 0 10px; padding-left: 18px; }
+.mockups .mockup { padding: 10px; margin-top: 10px; }
+.dropzone { margin-top: 6px; padding: 18px 10px; text-align: center; border: 2px dashed var(--border); border-radius: var(--radius); color: var(--muted); cursor: pointer; font-size: 13px; }
+.dropzone.over, .dropzone:focus-visible { border-color: var(--accent); color: var(--accent); outline: none; }
+.references input, .app-url input { width: 100%; }
+.reference { display: grid; grid-template-columns: 96px 1fr; gap: 10px; margin-top: 10px; align-items: start; }
+.app-url .row { display: flex; gap: 6px; }
+.lightbox { position: fixed; inset: 0; z-index: 100; background: rgb(10 12 20 / 82%); display: grid; place-items: center; padding: 24px; cursor: zoom-out; }
+.lightbox img { max-width: 100%; max-height: calc(100vh - 80px); border-radius: 8px; background: #fff; }
+.lightbox p { color: #fff; font-size: 13px; margin: 8px 0 0; text-align: center; }

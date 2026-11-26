@@ -6,6 +6,8 @@ import path from "node:path";
 import { applyOps, getLevel, normOps } from "../../shared/chart.ts";
 import type { ToolDef } from "../ai/deepseek.ts";
 import * as git from "../git.ts";
+import { Design } from "../design/design.ts";
+import { normStyle } from "../design/style.ts";
 import { safePath, type Project } from "../project.ts";
 
 const SKIP_DIRS = new Set([".git", "node_modules", ".chart", "dist", "build", "target", "__pycache__", ".venv", "venv"]);
@@ -76,6 +78,21 @@ export const TOOL_DEFS: ToolDef[] = [
   tool("app_output", "Latest output of the app started with start_app."),
   tool("stop_app", "Stop the app started with start_app."),
   tool("open_folder", "Open the project folder in the user's file manager."),
+  tool("get_design", "The project's style guide, reference images (as descriptions), mockups and screenshots."),
+  tool("update_style", "Replace the project's style guide (shape in the design guide).", { style: { type: "object", description: "The full style guide" } }, ["style"]),
+  tool(
+    "create_mockup",
+    "Render a mockup from one self-contained HTML page (rules in the design guide) and save it for the user to see.",
+    {
+      title: str("3 to 6 words"),
+      summary: str("2 or 3 sentences: what changes and why"),
+      html: str("The complete HTML page"),
+      bubble_ids: { type: "array", items: { type: "string" }, description: "Bubbles with a data-bubble region in the HTML" },
+      style: { type: "object", description: "The style guide this mockup proposes, if it is a new look" },
+    },
+    ["title", "html"],
+  ),
+  tool("take_screenshot", "Screenshot a UI bubble on the running app (start it with start_app first).", { bubble_id: str("Bubble id"), level: str('"root" for a module, else the module id the function is in') }, ["bubble_id"]),
 ];
 
 // ---------- background app per project ----------
@@ -101,6 +118,36 @@ export function stopApp(dir: string): boolean {
   }
   apps.delete(dir);
   return true;
+}
+
+/** Start the project's app in the background (callers make sure the user agreed). */
+export function startApp(dir: string, cmd: string): { output: string } {
+  const running = apps.get(dir);
+  if (running) return running;
+  // The app must not inherit this server's own port (PORT is how many apps pick theirs).
+  const env = { ...process.env };
+  if (env.CDD_PORT && env.PORT === env.CDD_PORT) delete env.PORT;
+  const child = spawn(process.platform === "win32" ? "cmd" : "sh", process.platform === "win32" ? ["/c", cmd] : ["-c", cmd], { cwd: dir, env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+  const app = { child, output: "" };
+  apps.set(dir, app);
+  const onData = (d: Buffer) => (app.output = tail(app.output + d.toString(), 50_000));
+  child.stdout?.on("data", onData);
+  child.stderr?.on("data", onData);
+  child.on("exit", (code) => {
+    app.output += `\n[exited with code ${code}]`;
+    if (apps.get(dir) === app) apps.delete(dir);
+  });
+  // Spawn failures (e.g. the folder was moved) arrive as an event; without a listener they'd crash the server.
+  child.on("error", (err) => {
+    app.output += `\n[could not start: ${err.message}]`;
+    if (apps.get(dir) === app) apps.delete(dir);
+  });
+  return app;
+}
+
+/** Output of the app started for this project, or null when it isn't running. */
+export function appOutput(dir: string): string | null {
+  return apps.get(dir)?.output ?? null;
 }
 
 process.on("exit", () => {
@@ -261,21 +308,7 @@ export async function runTool(name: string, a: Args, ctx: ToolContext): Promise<
       const cmd = pc.stack?.runCommand?.trim() || "npm start";
       // Starting the app runs project code the assistant may have just written, so it always asks first.
       if (!(await ctx.approve(cmd))) return "The user did not allow starting the app.";
-      const child = spawn(process.platform === "win32" ? "cmd" : "sh", process.platform === "win32" ? ["/c", cmd] : ["-c", cmd], { cwd: p.dir, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
-      const app = { child, output: "" };
-      apps.set(p.dir, app);
-      const onData = (d: Buffer) => (app.output = tail(app.output + d.toString(), 50_000));
-      child.stdout?.on("data", onData);
-      child.stderr?.on("data", onData);
-      child.on("exit", (code) => {
-        app.output += `\n[exited with code ${code}]`;
-        if (apps.get(p.dir) === app) apps.delete(p.dir);
-      });
-      // Spawn failures (e.g. the folder was moved) arrive as an event; without a listener they'd crash the server.
-      child.on("error", (err) => {
-        app.output += `\n[could not start: ${err.message}]`;
-        if (apps.get(p.dir) === app) apps.delete(p.dir);
-      });
+      const app = startApp(p.dir, cmd);
       await new Promise((r) => setTimeout(r, 3000));
       return `Started \`${cmd}\`.\n${tail(app.output, 3000) || "(no output yet)"}`;
     }
@@ -293,6 +326,38 @@ export async function runTool(name: string, a: Args, ctx: ToolContext): Promise<
       } catch {
         return `Could not open a file manager here. The folder is ${p.dir}.`;
       }
+    }
+    case "get_design": {
+      const d = await new Design(p).state();
+      return JSON.stringify({
+        style: d.style,
+        references: d.references.map((r) => ({ note: r.note, description: r.description })),
+        mockups: d.mockups.slice(0, 10).map((m) => ({ id: m.id, title: m.title, summary: m.summary, bubbleIds: m.bubbleIds, created: m.created })),
+        screenshots: Object.values(d.screenshots).map((x) => ({ bubbleId: x.bubbleId, level: x.level, takenAt: x.takenAt })),
+      });
+    }
+    case "update_style": {
+      const style = await new Design(p).setStyleUnlocked(a.style, "Assistant: update the style guide", false);
+      ctx.changed.add(".chart/design/style.json");
+      return `Saved the style guide: ${style.summary}`;
+    }
+    case "create_mockup": {
+      const ids = Array.isArray(a.bubble_ids) ? a.bubble_ids.map(String) : [];
+      const m = await new Design(p).saveMockupUnlocked({
+        title: arg(a, "title").slice(0, 80),
+        summary: typeof a.summary === "string" ? a.summary : "",
+        request: "(made by the assistant)",
+        bubbleIds: ids,
+        style: normStyle(a.style),
+        html: arg(a, "html"),
+      }, false);
+      ctx.changed.add(m.image);
+      return `Saved mockup "${m.title}" (id ${m.id}). Regions found for: ${Object.keys(m.crops).join(", ") || "none (add data-bubble attributes)"}. The user sees it in the Design panel.`;
+    }
+    case "take_screenshot": {
+      const level = typeof a.level === "string" && a.level ? a.level : "root";
+      const shot = await new Design(p).screenshotUnlocked(level, arg(a, "bubble_id"), false);
+      return `Took a screenshot of ${shot.bubbleId} at ${shot.url}${shot.cropped ? "" : " (its element wasn't found, so it shows the whole page)"}. The user sees it on the bubble.`;
     }
     default:
       throw new Error(`Unknown tool ${name}`);

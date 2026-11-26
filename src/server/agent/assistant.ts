@@ -7,6 +7,7 @@ import type { AssistantEvent } from "../../shared/types.ts";
 import type { ChatMessage, ToolLLM } from "../ai/deepseek.ts";
 import * as git from "../git.ts";
 import type { Project } from "../project.ts";
+import { loadDesignGuide } from "../ai/llm.ts";
 import { runTool, TOOL_DEFS } from "./tools.ts";
 
 const SKILL_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../skills/cdd-assistant.md");
@@ -66,6 +67,8 @@ export class Assistant {
     const pc = await this.project.loadChart();
     const modules = pc.root.nodes.map((n) => `- ${n.id}: ${n.name} (${n.children?.nodes.length ?? 0} functions)`).join("\n") || "(no modules yet)";
     return `${loadSkill()}
+
+${loadDesignGuide()}
 
 ## Current project
 Name: ${this.project.name}

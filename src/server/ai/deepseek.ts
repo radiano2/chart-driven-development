@@ -1,7 +1,13 @@
 // Minimal DeepSeek chat client (OpenAI-compatible API) that always asks for JSON.
 
+export interface JsonOptions {
+  maxTokens?: number;
+  /** Images as data: URLs, sent with the user message (deepseek-flash reads images). */
+  images?: string[];
+}
+
 export interface JsonLLM {
-  json(system: string, user: string, opts?: { maxTokens?: number }): Promise<unknown>;
+  json(system: string, user: string, opts?: JsonOptions): Promise<unknown>;
 }
 
 /** DeepSeek flash is the only model the app uses. */
@@ -33,10 +39,10 @@ export class DeepSeek implements JsonLLM {
     this.timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
   }
 
-  async json(system: string, user: string, opts: { maxTokens?: number } = {}): Promise<unknown> {
+  async json(system: string, user: string, opts: JsonOptions = {}): Promise<unknown> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const content = await this.chat(system, user, opts.maxTokens ? opts.maxTokens + THINKING_ROOM : MAX_TOKENS);
+      const content = await this.chat(system, user, opts.maxTokens ? opts.maxTokens + THINKING_ROOM : MAX_TOKENS, opts.images ?? []);
       try {
         return parseJsonLoose(content);
       } catch (e) {
@@ -46,7 +52,11 @@ export class DeepSeek implements JsonLLM {
     throw new Error(`DeepSeek returned invalid JSON: ${(lastError as Error)?.message}`);
   }
 
-  private async chat(system: string, user: string, maxTokens: number): Promise<string> {
+  private async chat(system: string, user: string, maxTokens: number, images: string[]): Promise<string> {
+    // Images may only go in user messages, as OpenAI-style image_url parts.
+    const userContent = images.length
+      ? [{ type: "text", text: user }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))]
+      : user;
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
@@ -54,7 +64,7 @@ export class DeepSeek implements JsonLLM {
         model: this.model,
         messages: [
           { role: "system", content: system },
-          { role: "user", content: user },
+          { role: "user", content: userContent },
         ],
         response_format: { type: "json_object" },
         max_tokens: maxTokens,
