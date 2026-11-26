@@ -145,7 +145,7 @@ describe("opening an existing git repo", () => {
   });
 
   it("forget removes it from the list and leaves the folder alone", async () => {
-    ws.forget("notes-2");
+    await ws.forget("notes-2");
     assert.equal((await ws.list()).some((p) => p.name === "notes-2"), false);
     assert.ok(existsSync(path.join(dir, ".chart/chart.json")));
     assert.throws(() => ws.forget("notes-2"), /projects folder/);

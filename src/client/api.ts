@@ -15,6 +15,7 @@ import type {
   ProjectSummary,
   Recommendation,
   RecommendationOption,
+  RunChatMessage,
   RunTrace,
   ServerEvent,
   Stack,
@@ -62,6 +63,9 @@ export const api = {
   openPath: (path: string) => call<{ name: string; chart: ProjectChart; drawing: boolean; summary?: string; warnings?: string[] }>("POST", "/api/open", { path }),
   find: (description: string) => call<FindResult>("POST", "/api/find", { description }),
   forget: (name: string) => call<{ ok: boolean }>("POST", `${P(name)}/forget`),
+  remove: (name: string, deleteFolder: boolean, confirm = "") => call<{ ok: boolean; message: string }>("POST", `${P(name)}/remove`, { deleteFolder, confirm }),
+  runAsk: (name: string, level: Level, trace: RunTrace, history: RunChatMessage[], question: string) =>
+    call<{ answer: string }>("POST", `${P(name)}/run/ask`, { level, trace, history, question }),
   open: (name: string) => call<{ name: string; dir: string; chart: ProjectChart; outside: string[]; drawing: boolean }>("GET", P(name)),
   redraw: (name: string) => call<{ ok: boolean }>("POST", `${P(name)}/redraw`),
   stack: (name: string) => call<StackProposal>("POST", `${P(name)}/stack`),

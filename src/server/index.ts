@@ -4,10 +4,10 @@ import { readFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ServerEvent } from "../shared/types.ts";
+import type { RunChatMessage, RunTrace, ServerEvent } from "../shared/types.ts";
 import { AssistantHub } from "./agent/hub.ts";
 import { MockToolLLM } from "./agent/mock-llm.ts";
-import { runTool } from "./agent/tools.ts";
+import { runTool, stopApp } from "./agent/tools.ts";
 import { Design } from "./design/design.ts";
 import { closeBrowser } from "./design/render.ts";
 import { listFolder } from "./importer.ts";
@@ -152,7 +152,24 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
       }
       if (parts.length === 4 && parts[3] === "forget" && method === "POST") {
         await body(req);
-        return send(res, 200, ws.forget(parts[2]));
+        return send(res, 200, await ws.forget(parts[2]));
+      }
+      if (parts.length === 4 && parts[3] === "remove" && method === "POST") {
+        const b = await body(req);
+        const deleteFolder = b.deleteFolder === true;
+        // Deleting is for good: the request must carry the project's name, typed by the user.
+        if (deleteFolder && b.confirm !== parts[2]) throw new HttpError(400, `Type the project's name (${parts[2]}) to delete its folder`);
+        let p: Project | null = null;
+        try {
+          p = ws.get(parts[2]);
+        } catch {
+          /* its folder is gone: nothing running to stop */
+        }
+        if (p) {
+          hub.cancel(p);
+          stopApp(p.dir);
+        }
+        return send(res, 200, await ws.remove(parts[2], { deleteFolder }));
       }
       const p = ws.get(parts[2]);
       const action = parts.slice(3).join("/");
@@ -205,6 +222,15 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
             return send(res, 200, await p.addEdge(level, b.edge as never));
           case "run":
             return send(res, 200, await p.simulateRun(level));
+          case "run/ask": {
+            const trace = b.trace as RunTrace | undefined;
+            if (!trace || typeof trace !== "object" || !Array.isArray(trace.steps)) throw new HttpError(400, 'Missing "trace"');
+            const history = (Array.isArray(b.history) ? b.history : [])
+              .filter((m): m is RunChatMessage => !!m && typeof m === "object" && (m.role === "user" || m.role === "assistant") && typeof m.text === "string")
+              .slice(-12)
+              .map((m) => ({ role: m.role, text: m.text.slice(0, 2000) }));
+            return send(res, 200, { answer: await p.explainRun(level, trace, history, str(b.question, "question").slice(0, 1000)) });
+          }
           case "undo":
             return send(res, 200, await p.undo());
           case "restore":
