@@ -181,8 +181,8 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
           case "":
             return send(res, 200, { name: p.name, dir: p.dir, chart: await p.loadChart(), outside: await p.checkOutside(true), drawing: !!p.drawing, business: await p.businessState() });
           case "business":
-            // Looking at it brings it up to date if the code changed meanwhile. There's no way to edit it.
-            return send(res, 200, await p.viewBusiness());
+            // Only reads. There's no way to edit it.
+            return send(res, 200, await p.businessState());
           case "history":
             return send(res, 200, await p.history());
           case "file":
@@ -228,6 +228,10 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
           case "business":
             // Make it (first time, or after a failure). Refused when it already matches the code: it's read-only.
             return send(res, 200, await p.requestBusiness());
+          case "business/update":
+            // Looking at it: bring it up to date if the code changed while the app wasn't watching. (A POST, not part
+            // of the GET, because it can start an AI call.)
+            return send(res, 200, await p.viewBusiness());
           case "run":
             return send(res, 200, await p.simulateRun(level));
           case "run/ask": {

@@ -216,6 +216,8 @@ export interface ProjectSummary {
   linked?: boolean;
   /** A linked folder that isn't there any more (moved or deleted). */
   missing?: boolean;
+  /** Opened from existing code, and its functional chart hasn't been drawn. */
+  undrawn?: boolean;
 }
 
 // ---------- opening existing folders ----------

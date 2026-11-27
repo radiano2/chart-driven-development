@@ -308,7 +308,8 @@ export class Project {
   /** The business flow is derived from the code, so it stays out of git: undo and restore just make it rebuild. */
   private async excludeBusiness() {
     const f = path.join(this.dir, ".git", "info", "exclude");
-    const rule = `/${BUSINESS_FILE}`;
+    // The "*" covers the temporary file it's written to first, so a commit at that moment can't pick it up.
+    const rule = `/${BUSINESS_FILE}*`;
     const current = existsSync(f) ? await readFile(f, "utf8") : "";
     if (current.split("\n").includes(rule)) return;
     await mkdir(path.dirname(f), { recursive: true });
@@ -784,7 +785,7 @@ export class Workspace {
       if (out.some((p) => p.name === l.name)) continue;
       try {
         const pc = JSON.parse(await readFile(path.join(l.dir, CHART_FILE), "utf8")) as ProjectChart;
-        out.push({ name: l.name, idea: pc.idea, hasChart: pc.root.nodes.length > 0, dir: displayPath(l.dir), linked: true });
+        out.push({ name: l.name, idea: pc.idea, hasChart: pc.root.nodes.length > 0, dir: displayPath(l.dir), linked: true, ...(pc.undrawn ? { undrawn: true } : {}) });
       } catch {
         out.push({ name: l.name, idea: "", hasChart: false, dir: displayPath(l.dir), linked: true, missing: true });
       }

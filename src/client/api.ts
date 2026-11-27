@@ -70,8 +70,8 @@ export const api = {
   runAsk: (name: string, level: Level, trace: RunTrace, history: RunChatMessage[], question: string) =>
     call<{ answer: string }>("POST", `${P(name)}/run/ask`, { level, trace, history, question }),
   open: (name: string) => call<{ name: string; dir: string; chart: ProjectChart; outside: string[]; drawing: boolean; business: BusinessState }>("GET", P(name)),
-  /** The business flow; asking brings it up to date when the code changed. */
-  business: (name: string) => call<BusinessState>("GET", `${P(name)}/business`),
+  /** The business flow, brought up to date first if the code changed. */
+  business: (name: string) => call<BusinessState>("POST", `${P(name)}/business/update`),
   /** Make the business flow (first time, or after a failure). It can't be edited. */
   buildBusiness: (name: string) => call<BusinessState>("POST", `${P(name)}/business`),
   redraw: (name: string) => call<{ ok: boolean }>("POST", `${P(name)}/redraw`),

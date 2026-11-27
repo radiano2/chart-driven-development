@@ -215,7 +215,7 @@ function projectCard(p: ProjectSummary) {
     h("strong", {}, p.name),
     p.missing ? h("span", { class: "error small" }, "The folder isn't there any more. It may have moved; open it again from its new place.") : h("span", { class: "muted" }, p.idea),
     p.dir && h("code", { class: "small muted path" }, p.dir),
-    !p.hasChart && !p.missing && h("span", { class: "badge" }, "not generated yet"),
+    !p.hasChart && !p.missing && h("span", { class: "badge" }, p.undrawn ? "no functional chart yet" : "not generated yet"),
   );
   const remove = h("button", { class: "link small forget", title: "Remove this project from the list, or delete it", onclick: () => removeDialog(p) }, "Remove…");
   return h("div", { class: "project-item" }, card, remove);

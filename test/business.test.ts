@@ -235,6 +235,8 @@ describe("HTTP API", () => {
       assert.equal(made.status, 200);
       assert.equal(made.data.status, "building");
       await until(async () => (await call("GET", "/api/projects/shop/business")).data.status === "ready");
+      const look = await call("POST", "/api/projects/shop/business/update", {});
+      assert.equal(look.data.status, "ready", "nothing to update when the code hasn't changed");
       const again = await call("POST", "/api/projects/shop/business", {});
       assert.equal(again.status, 409);
       assert.match(again.data.error, /read-only/);
