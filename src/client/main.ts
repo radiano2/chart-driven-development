@@ -160,14 +160,23 @@ function toast(message: string, kind: "info" | "error" = "info") {
   toastTimer = window.setTimeout(() => (t.hidden = true), kind === "error" ? 9000 : 4000);
 }
 
+/** Requests started by `guard` that haven't come back yet. */
+let inFlight = 0;
+
 async function guard<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
-  if (state.busy) return;
+  if (state.busy) {
+    // Say why nothing happens, rather than ignore the click.
+    toast(`One moment: ${$("status-text").textContent || "the app is busy"}`);
+    return;
+  }
   setBusy(label);
+  inFlight++;
   try {
     return await fn();
   } catch (e) {
     toast((e as Error).message, "error");
   } finally {
+    inFlight--;
     setBusy(null);
   }
 }
@@ -190,6 +199,8 @@ async function goHome() {
     state.drawingChart = false;
     setBusy(null);
   }
+  // Nothing left waiting on the home page: never leave its buttons stuck behind an old "busy".
+  if (!inFlight && state.busy) setBusy(null);
   state.project = null;
   state.chart = null;
   state.view = "functional";
@@ -1688,7 +1699,11 @@ async function inspectFolder(path: string) {
   const info = await guard("Looking at the folder…", () => api.inspectFolder(path));
   if (!info) return;
   ($("open-path") as HTMLInputElement).value = info.display;
-  openResult().replaceChildren(inspectionCard(info));
+  const card = inspectionCard(info);
+  openResult().replaceChildren(card);
+  // The card can land below the fold: bring it (and the button that goes on) into view, so Open visibly does something.
+  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  (card.querySelector(".actions button.primary") as HTMLButtonElement | null)?.focus({ preventScroll: true });
 }
 
 function inspectionCard(info: FolderInspection) {
@@ -1698,7 +1713,8 @@ function inspectionCard(info: FolderInspection) {
     `${info.files.toLocaleString()} file${info.files === 1 ? "" : "s"}`,
     info.languages.join(", "),
   ].filter(Boolean);
-  const go = info.kind === "code" ? "Read the code and draw the chart" : info.known ? "Open" : "Add and open";
+  // Plain code opens on an empty board; what (if anything) gets drawn is asked there.
+  const go = info.kind === "code" ? (info.known ? "Open" : "Open on an empty board") : info.known ? "Open" : "Add and open";
   return h(
     "div",
     { class: "inspect" },
