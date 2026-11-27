@@ -95,6 +95,11 @@
   <main id="workspace" class="workspace" hidden>
     <div class="canvas-wrap">
       <div class="toolbar">
+        <div class="view-switch" id="view-switch" role="tablist" aria-label="Which chart">
+          <button id="view-functional" role="tab" title="Modules and functions: where the data goes and in what order">Functional</button>
+          <button id="view-business" role="tab" title="What a user does and what it leads to (read-only)">Business flow</button>
+        </div>
+        <span class="sep"></span>
         <button id="btn-up" title="Back to all modules">↑ Modules</button>
         <button id="btn-draw" title="Draw a new bubble by hand">＋ Bubble</button>
         <button id="btn-run" class="run" title="Animate invented test data flowing through this chart">▶ Run</button>
@@ -114,6 +119,7 @@
       <svg id="chart" class="chart" role="img" aria-label="Flowchart"></svg>
       <div id="reveal-bar" class="reveal-bar" role="status" hidden></div>
       <div id="empty-level" class="empty-level" hidden>This module is empty. Use <b>＋ Bubble</b> to draw its first function.</div>
+      <div id="choice" class="choice-wrap" hidden></div>
     </div>
     <aside class="panel" id="panel"></aside>
   </main>

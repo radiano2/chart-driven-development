@@ -79,6 +79,66 @@ export interface ProjectChart {
   root: Chart;
   /** Set while the chart of an opened codebase is still being drawn (it's saved after each step). */
   drawing?: boolean;
+  /** An opened codebase whose functional chart hasn't been drawn: the user chose to wait, or hasn't chosen yet. */
+  undrawn?: boolean;
+}
+
+// ---------- business flow (read-only) ----------
+
+/**
+ * "action": the user does something or data comes in. "process": the program works on it. "decision": the flow
+ * branches. "output": a result leaves the program (shown to the user, saved, sent somewhere).
+ */
+export type BusinessStepKind = "action" | "process" | "decision" | "output";
+
+export interface BusinessStep {
+  id: string;
+  name: string;
+  kind: BusinessStepKind;
+  /** Who does it or where it happens: "User", "App", "Server", "Payment provider"… */
+  actor: string;
+  /** What happens here, in plain words. */
+  description: string;
+  /** The feature of the program this step uses, in plain words. */
+  feature: string;
+  /** What comes in and what goes out here, in plain words. */
+  dataIn: string;
+  dataOut: string;
+  /** Where in the code it happens: files (and, for drawn charts, module ids). */
+  code: string[];
+}
+
+export interface BusinessLink {
+  id: string;
+  from: string;
+  to: string;
+  /** What passes along this arrow, or the branch taken ("yes", "card declined"). */
+  label: string;
+  order: number;
+}
+
+/**
+ * How the program is used, end to end: which user action leads to which consequences. Derived from the code and
+ * read-only: nobody (the AI included) edits it; it is rebuilt when the code changes. Kept in .chart/business.json,
+ * outside git (it's derived data, so undo and restore just make it rebuild).
+ */
+export interface BusinessFlow {
+  version: 1;
+  summary: string;
+  steps: BusinessStep[];
+  links: BusinessLink[];
+  /** Fingerprint of the code it was built from. */
+  basedOn: string;
+  updated: string;
+}
+
+export interface BusinessState {
+  flow: BusinessFlow | null;
+  /** "building": the first one is being made; "updating": the code changed and it's being rebuilt. */
+  status: "none" | "building" | "ready" | "updating" | "failed";
+  /** The code changed since the flow was built. */
+  stale: boolean;
+  error: string | null;
 }
 
 /** Where in the chart we are: "root" is the module level, otherwise a module id. */
@@ -156,6 +216,8 @@ export interface ProjectSummary {
   linked?: boolean;
   /** A linked folder that isn't there any more (moved or deleted). */
   missing?: boolean;
+  /** Opened from existing code, and its functional chart hasn't been drawn. */
+  undrawn?: boolean;
 }
 
 // ---------- opening existing folders ----------
@@ -309,4 +371,5 @@ export type ServerEvent =
   | { type: "draw-failed"; message: string }
   | { type: "error"; message: string }
   | { type: "assistant"; event: AssistantEvent }
-  | { type: "design"; design: DesignState };
+  | { type: "design"; design: DesignState }
+  | { type: "business"; business: BusinessState };

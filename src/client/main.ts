@@ -1,7 +1,8 @@
+import { BUSINESS_LEVEL, businessChart } from "../shared/business.ts";
 import { getLevel } from "../shared/chart.ts";
-import type { Bubble, DesignState, FindResult, FolderInspection, FolderListing, Level, Mockup, Port, ProjectChart, ProjectSummary, Recommendation, RunChatMessage, RunTrace, ServerEvent, Stack } from "../shared/types.ts";
+import type { Bubble, BusinessState, BusinessStep, Chart, DesignState, FindResult, FolderInspection, FolderListing, Level, Mockup, Port, ProjectChart, ProjectSummary, Recommendation, RunChatMessage, RunTrace, ServerEvent, Stack } from "../shared/types.ts";
 import { api, type ChangeResult } from "./api.ts";
-import { ChartView } from "./chart-view.ts";
+import { ChartView, type NodeDecor } from "./chart-view.ts";
 import { allKeys, pendingSteps, revealKey, stepPause, visiblePart } from "./reveal.ts";
 
 // ---------- tiny DOM helper (always textContent, never innerHTML: AI output is untrusted) ----------
@@ -46,6 +47,11 @@ interface State {
   /** Unsent text in the design panel / a bubble's mockup box, kept across re-renders. */
   designDraft: string;
   refNote: string;
+  /** Which chart the board shows: the functional chart (editable) or the business flow (read-only). */
+  view: "functional" | "business";
+  business: BusinessState | null;
+  /** The "what should the AI draw?" card is on the empty board. */
+  choosing: boolean;
 }
 
 const state: State = {
@@ -67,6 +73,9 @@ const state: State = {
   designData: null,
   designDraft: "",
   refNote: "",
+  view: "functional",
+  business: null,
+  choosing: false,
 };
 
 let events: EventSource | null = null;
@@ -183,6 +192,9 @@ async function goHome() {
   }
   state.project = null;
   state.chart = null;
+  state.view = "functional";
+  state.business = null;
+  state.choosing = false;
   history.replaceState(null, "", "/");
   show("home");
   renderCrumbs();
@@ -203,7 +215,7 @@ function projectCard(p: ProjectSummary) {
     h("strong", {}, p.name),
     p.missing ? h("span", { class: "error small" }, "The folder isn't there any more. It may have moved; open it again from its new place.") : h("span", { class: "muted" }, p.idea),
     p.dir && h("code", { class: "small muted path" }, p.dir),
-    !p.hasChart && !p.missing && h("span", { class: "badge" }, "not generated yet"),
+    !p.hasChart && !p.missing && h("span", { class: "badge" }, p.undrawn ? "no functional chart yet" : "not generated yet"),
   );
   const remove = h("button", { class: "link small forget", title: "Remove this project from the list, or delete it", onclick: () => removeDialog(p) }, "Remove…");
   return h("div", { class: "project-item" }, card, remove);
@@ -318,8 +330,29 @@ function onServerEvent(project: string, ev: ServerEvent) {
   } else if (ev.type === "draw-failed") {
     stopReveal();
     stopDrawingUi();
-    toast(`Couldn't draw the chart: ${ev.message} The half-drawn chart was removed and your code wasn't touched. Open the folder again to retry.`, "error");
-    void goHome();
+    toast(`Couldn't draw the chart: ${ev.message} The board is back to empty and your code wasn't touched. You can try again.`, "error");
+    api
+      .open(project)
+      .then((d) => {
+        if (state.project !== project) return;
+        state.chart = d.chart;
+        state.business = d.business;
+        if (!$("workspace").hidden) renderChart();
+        offerChoice();
+      })
+      .catch(() => void goHome());
+  } else if (ev.type === "business") {
+    const was = state.business;
+    state.business = ev.business;
+    if (ev.business.status === "failed" && was?.status !== "failed") toast(`Couldn't draw the business flow: ${ev.business.error}`, "error");
+    if ($("workspace").hidden) return;
+    if (state.view === "business") {
+      // A run follows the flow it started on; a rebuilt flow shows once it's closed.
+      // The first flow is fitted to the board; an updated one keeps your pan and zoom and animates what's new.
+      if (!state.run) renderChart(!!was?.flow, was?.flow?.updated !== ev.business.flow?.updated);
+      else renderPanel();
+    }
+    renderToolbar();
   } else if (ev.type === "design") {
     state.designData = ev.design;
     if (!$("workspace").hidden) renderPanel();
@@ -369,11 +402,114 @@ async function openProject(name: string) {
       if (!$("workspace").hidden) renderPanel();
     })
     .catch(() => undefined);
-  if (!data.chart.root.nodes.length && !data.drawing && !data.chart.drawing) return startStackChoice(name, data.chart.idea);
+  state.business = data.business;
+  state.view = "functional";
+  if (!data.chart.root.nodes.length && !data.drawing && !data.chart.drawing && !data.chart.undrawn) return startStackChoice(name, data.chart.idea);
   history.replaceState(null, "", `/?p=${encodeURIComponent(name)}`);
   state.drawingChart = data.drawing;
+  // Code opened without a functional chart: show its business flow if it has one (or one is on the way).
+  const biz = data.business;
+  state.view = data.chart.undrawn && !data.drawing && (biz.flow || biz.status === "building") ? "business" : "functional";
   enterWorkspace(data.drawing);
   if (data.drawing) startDrawingUi(true);
+  else offerChoice();
+  if (state.view === "business") refreshBusiness();
+}
+
+/** Plain code with nothing drawn yet: ask what to draw, on the empty board. */
+function offerChoice() {
+  const b = state.business;
+  state.choosing = !!state.chart?.undrawn && !state.drawingChart && !b?.flow && b?.status !== "building" && b?.status !== "updating";
+  renderChoice();
+}
+
+function renderChoice() {
+  const box = $("choice");
+  box.hidden = !state.choosing || $("workspace").hidden;
+  if (box.hidden) return box.replaceChildren();
+  const option = (label: string, text: string, onclick: () => void, extra = "") => h("button", { class: extra, onclick }, h("strong", {}, label), h("span", {}, text));
+  box.replaceChildren(
+    h(
+      "div",
+      { class: "choice", role: "dialog", "aria-labelledby": "choice-title" },
+      h("p", { class: "eyebrow" }, "The project is open"),
+      h("h2", { id: "choice-title" }, "What should the AI draw?"),
+      h("p", { class: "muted" }, "Nothing is drawn yet, and your code hasn't been changed. Pick one now, or later: both stay available on the board."),
+      h(
+        "div",
+        { class: "choice-options" },
+        option("Nothing for now", "Keep the board empty. You can draw either chart from here any time.", () => {
+          state.choosing = false;
+          renderChoice();
+          renderChart();
+        }),
+        option("Functional chart", "Modules and functions: where the data goes, how it's processed and in what order. You can keep building on it with the AI.", () => void drawFunctional(), "recommended"),
+        option("Business flow", "What a user does and what each action leads to in the program: where data comes in, where it's processed and where results come out. Read-only: it updates itself when the code changes.", () => void drawBusiness()),
+      ),
+    ),
+  );
+  (box.querySelector(".choice-options button.recommended") as HTMLButtonElement | null)?.focus();
+}
+
+/** Draw the functional chart of code that was opened without one. */
+async function drawFunctional() {
+  const name = state.project;
+  if (!name) return;
+  const ok = await guard("Starting…", () => api.redraw(name));
+  if (!ok || state.project !== name) return;
+  state.choosing = false;
+  renderChoice();
+  if (state.view !== "functional") setView("functional");
+  startDrawingUi();
+  renderBanner();
+}
+
+/** Make the business flow (the first time, or after it failed). */
+async function drawBusiness() {
+  const name = state.project;
+  if (!name) return;
+  const st = await guard("Starting…", () => api.buildBusiness(name));
+  if (!st || state.project !== name) return;
+  state.business = st;
+  state.choosing = false;
+  renderChoice();
+  if (state.view !== "business") setView("business");
+  else renderChart();
+}
+
+/** Ask for the business flow; the server rebuilds it first if the code changed. */
+function refreshBusiness() {
+  const name = state.project;
+  if (!name) return;
+  api
+    .business(name)
+    .then((st) => {
+      if (state.project !== name) return;
+      const changed = st.status !== state.business?.status || st.flow?.updated !== state.business?.flow?.updated;
+      state.business = st;
+      if (changed && state.view === "business" && !state.run && !$("workspace").hidden) renderChart(true);
+      renderToolbar();
+    })
+    .catch(() => undefined);
+}
+
+/** Switch the board between the functional chart and the business flow. */
+function setView(v: State["view"]) {
+  if (v === state.view || moving) return;
+  // The live drawing keeps going on the functional chart; it just stops moving the view around.
+  if (reveal?.follow) {
+    reveal.follow = false;
+    renderRevealBar();
+  }
+  view.stopRun();
+  view.connectFrom = null;
+  $("connect-hint").hidden = true;
+  state.view = v;
+  state.level = "root";
+  state.selected = null;
+  resetPanelState();
+  renderChart(false, false, { how: "in" });
+  if (v === "business") refreshBusiness();
 }
 
 /**
@@ -572,6 +708,7 @@ function renderRevealBar() {
         {
           title: "Open each module again as it's drawn",
           onclick: () => {
+            if (state.view !== "functional") setView("functional");
             r.follow = true;
             r.wake?.();
             renderRevealBar();
@@ -613,10 +750,26 @@ function renderRevealBar() {
 function enterWorkspace(live = false) {
   state.level = "root";
   state.selected = null;
+  state.choosing = false;
   resetPanelState();
   show("workspace");
-  if (!live) renderChart();
+  renderChoice();
+  if (!live || state.view === "business") renderChart();
+  renderToolbar();
   renderBanner();
+}
+
+/** Toolbar buttons that fit the chart on the board: the business flow can only be looked at and run. */
+function renderToolbar() {
+  const biz = state.view === "business";
+  // Nothing to build on until the functional chart is drawn (drawing it is offered on the board).
+  const undrawn = !biz && !!state.chart?.undrawn;
+  $("view-functional").setAttribute("aria-selected", String(!biz));
+  $("view-business").setAttribute("aria-selected", String(biz));
+  $("btn-up").hidden = biz || state.level === "root";
+  $("btn-draw").hidden = biz || undrawn;
+  $("btn-design").hidden = biz || undrawn;
+  $("btn-run").hidden = biz ? !state.business?.flow : undrawn;
 }
 
 /** A level change in progress: ignore other clicks until its animation is done. */
@@ -631,6 +784,7 @@ async function openLevel(level: Level, focus?: string, auto = false) {
     reveal.follow = false;
     renderRevealBar();
   }
+  if (state.view === "business") return;
   if (moving || !state.chart || level === state.level) {
     if (focus && level === state.level) select(focus);
     return;
@@ -683,7 +837,9 @@ function renderCrumbs() {
   c.replaceChildren();
   if (!state.project) return;
   c.append(h("button", { onclick: () => void openLevel("root") }, state.project));
-  if (state.level !== "root") {
+  if (state.view === "business") {
+    c.append(h("span", { class: "sep" }, "›"), h("span", { class: "current" }, "Business flow"));
+  } else if (state.level !== "root") {
     const mod = state.chart?.root.nodes.find((n) => n.id === state.level);
     c.append(h("span", { class: "sep" }, "›"), h("span", { class: "current" }, mod?.name ?? state.level));
   }
@@ -691,8 +847,32 @@ function renderCrumbs() {
 
 // ---------- chart ----------
 
-function currentChart() {
+function currentChart(): Chart | null {
+  if (state.view === "business") {
+    const flow = state.business?.flow;
+    return flow ? businessChart(flow) : { nodes: [], edges: [] };
+  }
   return state.chart ? getLevel(state.chart, state.level) : null;
+}
+
+const STEP_KIND: Record<BusinessStep["kind"], string> = { action: "Action", process: "Processing", decision: "Decision", output: "Result" };
+
+/** The business flow's steps are drawn with who does them and what kind of step they are. */
+function businessDecor(): Map<string, NodeDecor> {
+  const out = new Map<string, NodeDecor>();
+  for (const s of state.business?.flow?.steps ?? []) {
+    out.set(s.id, {
+      top: `${STEP_KIND[s.kind]} · ${s.actor}`.toUpperCase(),
+      bottom: s.feature || s.dataOut || s.dataIn,
+      cls: `biz biz-${s.kind}`,
+      title: `${s.name}\n${s.description}`,
+    });
+  }
+  return out;
+}
+
+function businessStep(id: string | null): BusinessStep | undefined {
+  return id ? state.business?.flow?.steps.find((s) => s.id === id) : undefined;
 }
 
 function currentBubble(): Bubble | undefined {
@@ -700,6 +880,7 @@ function currentBubble(): Bubble | undefined {
 }
 
 function renderChart(keepView = false, animate = false, enter?: { how: "in" | "out"; from?: string }) {
+  if (state.view === "business") return renderBusinessChart(keepView, animate, enter);
   const chart = currentChart();
   if (!chart) {
     if (!state.chart || state.level === "root") return;
@@ -711,13 +892,48 @@ function renderChart(keepView = false, animate = false, enter?: { how: "in" | "o
   const empty = $("empty-level");
   if ((state.drawingChart || reveal) && !chart.nodes.length) {
     empty.replaceChildren(h("span", { class: "drawing-note" }, h("span", { class: "spinner" }), state.level === "root" ? "Reading your code. Modules appear here as they're found." : "This module's functions appear here as soon as they're drawn."));
+  } else if (state.chart?.undrawn && state.level === "root") {
+    empty.replaceChildren(
+      h("p", {}, h("strong", {}, "The functional chart isn't drawn yet.")),
+      h("p", {}, "The AI can read the code and draw its modules and functions: where the data goes and in what order."),
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { class: "primary ai", onclick: () => void drawFunctional() }, "Draw the functional chart"),
+        h("button", { onclick: () => setView("business") }, "See the business flow"),
+      ),
+    );
   } else {
     empty.replaceChildren("This module is empty. Use ", h("b", {}, "＋ Bubble"), " to draw its first function.");
   }
   if (state.selected && !chart.nodes.some((n) => n.id === state.selected)) state.selected = null;
   view.setSelected(state.selected);
-  $("btn-up").hidden = state.level === "root";
-  empty.hidden = chart.nodes.length > 0;
+  empty.hidden = chart.nodes.length > 0 || state.choosing;
+  renderToolbar();
+  renderCrumbs();
+  renderPanel();
+}
+
+/** The business flow on the board. It can be looked at and run, never edited. */
+function renderBusinessChart(keepView: boolean, animate: boolean, enter?: { how: "in" | "out"; from?: string }) {
+  const chart = currentChart()!;
+  view.render(chart, { keepView, animate, key: `${state.project}/${BUSINESS_LEVEL}`, enter, decor: businessDecor() });
+  const empty = $("empty-level");
+  const st = state.business;
+  if (st?.status === "building") {
+    empty.replaceChildren(h("span", { class: "drawing-note" }, h("span", { class: "spinner" }), "The AI is reading the code to work out the business flow…"));
+  } else {
+    empty.replaceChildren(
+      h("p", {}, h("strong", {}, "There's no business flow yet.")),
+      h("p", {}, "The AI reads the code and draws what a user does and what each action leads to in the program. It's read-only and updates itself when the code changes."),
+      st?.status === "failed" ? h("p", { class: "error small" }, `Last try failed: ${st.error}`) : "",
+      h("div", { class: "actions" }, h("button", { class: "primary ai", onclick: () => void drawBusiness() }, st?.status === "failed" ? "Try again" : "Draw the business flow")),
+    );
+  }
+  if (state.selected && !chart.nodes.some((n) => n.id === state.selected)) state.selected = null;
+  view.setSelected(state.selected);
+  empty.hidden = chart.nodes.length > 0 || state.choosing;
+  renderToolbar();
   renderCrumbs();
   renderPanel();
 }
@@ -767,6 +983,7 @@ function renderPanel() {
     panel.append(historyPanel());
     return;
   }
+  if (state.view === "business") return panel.append(businessPanel());
   if (state.drawing) return panel.append(drawPanel());
   const b = currentBubble();
   panel.append(b ? bubblePanel(b) : levelPanel());
@@ -802,6 +1019,94 @@ function levelPanel() {
       ),
     ),
   );
+  return wrap;
+}
+
+function businessPanel() {
+  const st = state.business;
+  const flow = st?.flow ?? null;
+  const step = businessStep(state.selected);
+  const wrap = h("div", { class: "panel-body" });
+  if (step) {
+    const name = state.project!;
+    wrap.append(
+      h("p", { class: "eyebrow" }, `${STEP_KIND[step.kind]} · ${step.actor}`),
+      h("h2", {}, step.name),
+      h("p", {}, step.description || h("span", { class: "muted" }, "No description.")),
+      step.feature ? h("p", {}, h("strong", {}, "Feature: "), step.feature) : "",
+      h(
+        "div",
+        { class: "io-grid" },
+        h("div", { class: "ports" }, h("h4", {}, "Comes in"), h("p", { class: step.dataIn ? "" : "muted small" }, step.dataIn || "nothing")),
+        h("div", { class: "ports" }, h("h4", {}, "Goes out"), h("p", { class: step.dataOut ? "" : "muted small" }, step.dataOut || "nothing")),
+      ),
+    );
+    const files = step.code.filter((c) => c.includes(".") || c.includes("/"));
+    if (files.length) {
+      wrap.append(
+        h("h4", {}, "Where it happens in the code"),
+        h(
+          "div",
+          { class: "biz-files" },
+          ...files.map((f) =>
+            h(
+              "button",
+              {
+                title: state.code?.path === f ? "Hide the code" : "Show the code",
+                "aria-pressed": String(state.code?.path === f),
+                onclick: async () => {
+                  if (state.code?.path === f) state.code = null;
+                  else {
+                    try {
+                      state.code = await api.file(name, f);
+                    } catch (e) {
+                      toast((e as Error).message, "error");
+                    }
+                  }
+                  renderPanel();
+                },
+              },
+              f,
+            ),
+          ),
+        ),
+      );
+      if (state.code && files.includes(state.code.path)) wrap.append(codeBlock(state.code.content));
+    }
+    wrap.append(h("p", { class: "small muted" }, "This flow is read-only. To change what the program does, use the functional chart or the Assistant; the flow follows the code."));
+    return wrap;
+  }
+  wrap.append(h("p", { class: "eyebrow" }, "Business flow ", h("span", { class: "badge readonly" }, "read-only")), h("h2", {}, state.chart?.name ?? state.project ?? ""));
+  if (flow) wrap.append(h("p", {}, flow.summary));
+  const status =
+    st?.status === "building"
+      ? h("p", { class: "biz-status" }, h("span", { class: "spinner" }), "Reading the code…")
+      : st?.status === "updating"
+        ? h("p", { class: "biz-status" }, h("span", { class: "spinner" }), "The code changed. Updating the flow…")
+        : st?.status === "failed"
+          ? h("div", {}, h("p", { class: "error small" }, `Couldn't ${flow ? "update" : "draw"} it: ${st.error}`), h("button", { onclick: () => void drawBusiness() }, "Try again"))
+          : flow
+            ? h("p", { class: "small muted" }, `Matches the code as of ${new Date(flow.updated).toLocaleString()}.`)
+            : null;
+  if (status) wrap.append(status);
+  if (flow) {
+    wrap.append(
+      h("div", { class: "legend" }, ...(["action", "process", "decision", "output"] as const).map((k) => h("span", {}, h("i", { class: k }), STEP_KIND[k]))),
+      h(
+        "div",
+        { class: "tips" },
+        h("h4", {}, "How to read it"),
+        h(
+          "ul",
+          {},
+          h("li", {}, "It shows what a user does and what each action leads to: where data comes in, where it's processed and where results come out."),
+          h("li", {}, "Click a step to see what happens there and where in the code."),
+          h("li", {}, "Press ▶ Run to follow invented test data through the flow."),
+          h("li", {}, "Nobody edits it, the AI included. It's redrawn from the code whenever the code changes."),
+        ),
+      ),
+    );
+  }
   return wrap;
 }
 
@@ -1202,6 +1507,28 @@ function renderBanner() {
   b.hidden = !files.length || !state.project;
   if (b.hidden) return;
   const name = state.project!;
+  const changed = h("strong", {}, `${files.length} file${files.length > 1 ? "s" : ""} changed outside the app`);
+  const list = `: ${files.slice(0, 4).join(", ")}${files.length > 4 ? "…" : ""}.`;
+  if (state.chart?.undrawn) {
+    // No functional chart to update. Keeping the changes is what moves the business flow along.
+    b.replaceChildren(
+      h("span", {}, changed, list, state.business?.flow ? " Keep them, and the business flow updates to match." : " Keep them as a version so they can be undone?"),
+      h(
+        "button",
+        {
+          class: "primary",
+          onclick: () =>
+            void guard("Saving…", async () => {
+              await api.acceptOutside(name);
+              state.outside = [];
+              renderBanner();
+            }),
+        },
+        "Keep the changes",
+      ),
+    );
+    return;
+  }
   b.replaceChildren(
     h("span", {}, h("strong", {}, `${files.length} file${files.length > 1 ? "s" : ""} changed outside the app`), `: ${files.slice(0, 4).join(", ")}${files.length > 4 ? "…" : ""}. Read the changes and update the chart?`),
     h(
@@ -1909,9 +2236,11 @@ $("btn-run").addEventListener("click", () => {
   const name = state.project;
   if (!name) return;
   void guard("Inventing test data…", async () => {
-    const trace = await api.run(name, state.level);
+    const level = state.view === "business" ? BUSINESS_LEVEL : state.level;
+    const trace = await api.run(name, level);
     if (!trace.steps.length) return toast("Nothing to run at this level yet.");
-    void playRun(trace);
+    if (state.project !== name || (level === BUSINESS_LEVEL) !== (state.view === "business")) return; // switched meanwhile
+    void playRun(trace, level);
   });
 });
 $("btn-undo").addEventListener("click", () => {
@@ -1941,6 +2270,8 @@ $("btn-history").addEventListener("click", () => {
   state.history = !state.history;
   renderPanel();
 });
+$("view-functional").addEventListener("click", () => setView("functional"));
+$("view-business").addEventListener("click", () => setView("business"));
 $("btn-fit").addEventListener("click", () => view.fit());
 $("btn-zoom-in").addEventListener("click", () => view.zoomBy(1.2));
 $("btn-zoom-out").addEventListener("click", () => view.zoomBy(1 / 1.2));

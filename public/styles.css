@@ -383,3 +383,33 @@ button.primary.danger { background: var(--danger); border-color: var(--danger); 
   .reveal-bar { animation: none; }
   .reveal-bar .reveal-meter span { transition: none; }
 }
+
+/* ---------- functional / business switch, the choice on an empty board, business flow ---------- */
+.view-switch { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.view-switch button { border: 0; border-radius: 0; background: none; padding: 5px 12px; }
+.view-switch button + button { border-left: 1px solid var(--border); }
+.view-switch button[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.empty-level { text-align: center; max-width: min(460px, 90%); }
+.empty-level .actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }
+.choice-wrap { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, var(--bg) 55%, transparent); overflow: auto; }
+.choice { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 22px; max-width: 760px; width: 100%; animation: reveal-bar-in .3s ease-out; }
+.choice h2 { margin: 0 0 4px; }
+.choice-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 16px; }
+.choice-options button { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; text-align: left; padding: 14px; border-radius: 10px; background: var(--surface); }
+.choice-options button strong { font-size: 15px; }
+.choice-options button span { color: var(--muted); font-size: 13px; line-height: 1.4; }
+.choice-options button.recommended { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.node.biz .body { fill: var(--surface); }
+.node.biz-action .body { fill: var(--accent-soft); stroke: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.node.biz-decision .body { fill: var(--amber-soft); stroke: color-mix(in srgb, var(--amber) 55%, var(--border)); }
+.node.biz-output .body { fill: var(--teal-soft); stroke: color-mix(in srgb, var(--teal) 50%, var(--border)); }
+.badge.readonly { background: var(--surface-2); color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 12px; color: var(--muted); margin: 4px 0; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 4px; margin-right: 5px; vertical-align: -1px; border: 1px solid var(--border); }
+.legend .action { background: var(--accent-soft); }
+.legend .process { background: var(--surface); }
+.legend .decision { background: var(--amber-soft); }
+.legend .output { background: var(--teal-soft); }
+.biz-status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.biz-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.biz-files button { font: 12px var(--mono); padding: 2px 8px; }

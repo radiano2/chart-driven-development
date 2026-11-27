@@ -3,9 +3,12 @@ import { EventEmitter } from "node:events";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { BUSINESS_LEVEL, businessAsProject } from "../shared/business.ts";
 import { applyOps, filesOf, findBubble, getLevel, normBubble, normEdge, slug } from "../shared/chart.ts";
 import type {
   Bubble,
+  BusinessFlow,
+  BusinessState,
   Chart,
   ChangeSet,
   FileChange,
@@ -43,6 +46,7 @@ import {
 } from "./importer.ts";
 
 const CHART_FILE = ".chart/chart.json";
+const BUSINESS_FILE = ".chart/business.json";
 
 export class HttpError extends Error {
   constructor(public status: number, message: string) {
@@ -188,7 +192,128 @@ export class Project {
   async commit(message: string): Promise<boolean> {
     const made = await git.commitAll(this.dir, message);
     this.lastOutside = "";
+    if (made) this.codeMayHaveChanged();
     return made;
+  }
+
+  // ---------- business flow (read-only, rebuilt when the code changes) ----------
+
+  private bizRunning = false;
+  private bizError: string | null = null;
+  private bizTimer: NodeJS.Timeout | null = null;
+
+  async loadBusiness(): Promise<BusinessFlow | null> {
+    try {
+      const flow = JSON.parse(await readFile(path.join(this.dir, BUSINESS_FILE), "utf8")) as BusinessFlow;
+      return flow && Array.isArray(flow.steps) && Array.isArray(flow.links) ? flow : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async businessState(): Promise<BusinessState> {
+    const flow = await this.loadBusiness();
+    const stale = !!flow && flow.basedOn !== (await git.codeFingerprint(this.dir));
+    const status: BusinessState["status"] = this.bizRunning ? (flow ? "updating" : "building") : this.bizError ? "failed" : flow ? "ready" : "none";
+    return { flow, status, stale, error: this.bizRunning ? null : this.bizError };
+  }
+
+  private async emitBusiness() {
+    this.emit({ type: "business", business: await this.businessState() });
+  }
+
+  /**
+   * Make the business flow, the first time (the user asked for it) or again after a failure, or bring a flow that's
+   * out of date up to date. A flow that matches the code is never remade: it's read-only.
+   */
+  async requestBusiness(): Promise<BusinessState> {
+    const st = await this.businessState();
+    if (st.status === "building" || st.status === "updating") return st;
+    if (st.flow && !st.stale) throw new HttpError(409, "The business flow is read-only. It already matches the code and updates itself when the code changes.");
+    this.buildBusiness();
+    return this.businessState();
+  }
+
+  /** Looking at the business flow: bring it up to date if the code changed while nobody was watching. */
+  async viewBusiness(): Promise<BusinessState> {
+    const st = await this.businessState();
+    if (st.status === "ready" && st.stale) {
+      this.buildBusiness();
+      return this.businessState();
+    }
+    return st;
+  }
+
+  /** After a commit: when there is a business flow and the code changed, rebuild it (once things settle). */
+  private codeMayHaveChanged() {
+    if (!existsSync(path.join(this.dir, BUSINESS_FILE))) return;
+    if (this.bizTimer) clearTimeout(this.bizTimer);
+    this.bizTimer = setTimeout(() => {
+      this.bizTimer = null;
+      void this.businessState()
+        .then((st) => {
+          if (st.stale && !this.bizRunning) {
+            this.bizError = null;
+            this.buildBusiness();
+          }
+        })
+        .catch(() => undefined);
+    }, 800);
+    this.bizTimer.unref();
+  }
+
+  /** The running build of the business flow, for callers that wait for it (tests, the CLI). */
+  businessJob: Promise<void> | null = null;
+
+  private buildBusiness() {
+    if (this.bizRunning) return;
+    this.bizRunning = true;
+    this.bizError = null;
+    const job = (async () => {
+      await this.emitBusiness();
+      // If the code changes while the AI works, go again (a few times at most) so the flow ends up matching it.
+      for (let round = 0; round < 3; round++) {
+        const basedOn = await git.codeFingerprint(this.dir);
+        const all = await git.listFiles(this.dir);
+        const { tree, files, omitted } = await selectSources(this.dir, all);
+        let chart: ProjectChart | null = null;
+        try {
+          const pc = await this.loadChart();
+          if (!pc.drawing && pc.root.nodes.length) chart = pc;
+        } catch {
+          /* no chart: the code is enough */
+        }
+        const r = await this.ai.businessFlow({ folder: path.basename(this.dir), tree, files, omitted, chart });
+        if (!r.steps.length) throw new HttpError(502, "The AI couldn't find a business flow in this code. Try again.");
+        const flow: BusinessFlow = { version: 1, summary: r.summary, steps: r.steps, links: r.links, basedOn, updated: new Date().toISOString() };
+        await this.excludeBusiness();
+        await mkdir(path.join(this.dir, ".chart"), { recursive: true });
+        const tmp = path.join(this.dir, `${BUSINESS_FILE}.${process.pid}.tmp`);
+        await writeFile(tmp, JSON.stringify(flow, null, 2) + "\n");
+        await rename(tmp, path.join(this.dir, BUSINESS_FILE));
+        if ((await git.codeFingerprint(this.dir)) === basedOn) break;
+      }
+    })()
+      .catch((e: unknown) => {
+        this.bizError = (e as Error).message || "Something went wrong";
+      })
+      .finally(() => {
+        this.bizRunning = false;
+        this.businessJob = null;
+        return this.emitBusiness().catch(() => undefined);
+      });
+    this.businessJob = job;
+  }
+
+  /** The business flow is derived from the code, so it stays out of git: undo and restore just make it rebuild. */
+  private async excludeBusiness() {
+    const f = path.join(this.dir, ".git", "info", "exclude");
+    // The "*" covers the temporary file it's written to first, so a commit at that moment can't pick it up.
+    const rule = `/${BUSINESS_FILE}*`;
+    const current = existsSync(f) ? await readFile(f, "utf8") : "";
+    if (current.split("\n").includes(rule)) return;
+    await mkdir(path.dirname(f), { recursive: true });
+    await writeFile(f, `${current.replace(/\n?$/, "\n")}# Chart Driven Development: the business flow is rebuilt from the code, not versioned\n${rule}\n`);
   }
 
   // ---------- creation ----------
@@ -313,17 +438,25 @@ export class Project {
     });
   }
 
-  /** After a failed drawing, remove the half-drawn chart, unless .chart was already in git (then git has the real one). */
+  /**
+   * After a failed drawing, put back the chart from git if there is one there, else an empty board that hasn't been
+   * drawn (the user can try again from it). The code is never touched.
+   */
   private async discardUnfinishedChart() {
     try {
-      if ((await git.git(this.dir, ["ls-files", "--", ".chart"])).trim()) {
-        await git.git(this.dir, ["checkout", "--", ".chart"]);
+      if ((await git.git(this.dir, ["ls-files", "--", CHART_FILE])).trim()) {
+        await git.git(this.dir, ["checkout", "--", CHART_FILE]);
       } else {
-        await rm(path.join(this.dir, ".chart"), { recursive: true, force: true });
+        await this.saveUndrawn();
       }
     } catch {
       /* leave it; the next open shows it as unfinished */
     }
+  }
+
+  /** An empty board for code whose functional chart hasn't been drawn. It isn't committed: nothing was made yet. */
+  async saveUndrawn() {
+    await this.saveChart({ version: 1, name: this.name, idea: `The existing project in ${path.basename(this.dir)}`, stack: null, root: { nodes: [], edges: [] }, undrawn: true });
   }
 
   // ---------- AI-driven changes ----------
@@ -424,21 +557,30 @@ export class Project {
 
   simulateRun(level: Level): Promise<RunTrace> {
     return this.exclusive(async () => {
-      const pc = await this.loadChart();
+      const [pc, lvl] = await this.runTarget(level);
       this.progress("Inventing test data…");
-      return this.ai.simulateRun(pc, level);
+      return this.ai.simulateRun(pc, lvl);
     });
+  }
+
+  /** The chart a run follows: a level of the functional chart, or the business flow. */
+  private async runTarget(level: Level): Promise<[ProjectChart, Level]> {
+    const pc = await this.loadChart();
+    if (level !== BUSINESS_LEVEL) return [pc, level];
+    const flow = await this.loadBusiness();
+    if (!flow) throw new HttpError(404, "There's no business flow yet.");
+    return [businessAsProject(pc, flow), "root"];
   }
 
   /** Answer a question about a run. Only reads the chart, so it doesn't wait for other work on the project. */
   async explainRun(level: Level, trace: RunTrace, history: RunChatMessage[], question: string): Promise<string> {
-    const pc = await this.loadChart();
+    const [pc, lvl] = await this.runTarget(level);
     // The trace comes back from the browser: keep it small.
     const small: RunTrace = {
       scenario: String(trace.scenario ?? "").slice(0, 300),
       steps: trace.steps.filter((s) => s && typeof s === "object").slice(0, 20).map((s) => ({ nodeId: String(s.nodeId).slice(0, 120), data: String(s.data ?? "").slice(0, 200), note: String(s.note ?? "").slice(0, 300) })),
     };
-    return this.ai.explainRun({ chart: pc, level, trace: small, history, question });
+    return this.ai.explainRun({ chart: pc, level: lvl, trace: small, history, question });
   }
 
   // ---------- history ----------
@@ -462,7 +604,7 @@ export class Project {
     if (!target) throw new HttpError(404, "Unknown version");
     // A folder opened from disk has history from before it had a chart; going back there would lose the chart.
     if (!(await git.hasFileAt(this.dir, target.sha, CHART_FILE))) throw new HttpError(400, "That version is from before this project had a chart, so it can't be restored here. Use git directly if you need it.");
-    await git.restore(this.dir, target.sha, `Restore: ${target.message.split("\n")[0]}`);
+    if (await git.restore(this.dir, target.sha, `Restore: ${target.message.split("\n")[0]}`)) this.codeMayHaveChanged();
     const pc = await this.loadChart();
     this.emit({ type: "chart", chart: pc });
     return { chart: pc };
@@ -498,6 +640,8 @@ export class Project {
   close() {
     if (this.watcher) clearInterval(this.watcher);
     this.watcher = null;
+    if (this.bizTimer) clearTimeout(this.bizTimer);
+    this.bizTimer = null;
   }
 
   /** Report files changed outside the app (uncommitted changes, since the app commits everything it does). */
@@ -550,6 +694,9 @@ function dropMissingFiles(nodes: Bubble[], known: Set<string>): string[] {
   }
   return warnings;
 }
+
+/** What to draw when a plain codebase is opened: nothing yet (the board offers the choice), its functional chart, or its business flow. */
+export type DrawChoice = "none" | "functional" | "business";
 
 export interface OpenResult {
   name: string;
@@ -638,7 +785,7 @@ export class Workspace {
       if (out.some((p) => p.name === l.name)) continue;
       try {
         const pc = JSON.parse(await readFile(path.join(l.dir, CHART_FILE), "utf8")) as ProjectChart;
-        out.push({ name: l.name, idea: pc.idea, hasChart: pc.root.nodes.length > 0, dir: displayPath(l.dir), linked: true });
+        out.push({ name: l.name, idea: pc.idea, hasChart: pc.root.nodes.length > 0, dir: displayPath(l.dir), linked: true, ...(pc.undrawn ? { undrawn: true } : {}) });
       } catch {
         out.push({ name: l.name, idea: "", hasChart: false, dir: displayPath(l.dir), linked: true, missing: true });
       }
@@ -814,8 +961,8 @@ export class Workspace {
       result.plan.push("Starts a git repo in the folder so every change can be undone. Dependencies, build output, logs and .env files are left out (listed in .git/info/exclude, not a new file).");
     }
     if (kind === "code") {
-      result.plan.push(`DeepSeek reads the code (the most telling files, up to about 110 KB) and draws the chart. Your code isn't changed.`);
-      result.plan.push(`The chart is saved in a .chart folder and committed${result.git.branch ? ` to your branch "${result.git.branch}"` : ""}. Every change the app makes after that is its own commit; history is never rewritten.`);
+      result.plan.push("It opens on an empty board. Then you choose what the AI draws: the functional chart (modules, functions, data), the business flow (what a user does and what it leads to), or nothing for now. Your code isn't changed.");
+      result.plan.push(`To draw, DeepSeek reads the code (the most telling files, up to about 110 KB). The functional chart is saved in a .chart folder and committed${result.git.branch ? ` to your branch "${result.git.branch}"` : ""}; every change the app makes after that is its own commit, and history is never rewritten. The business flow is kept in .chart but not committed.`);
     } else if (result.git.repo && !known) {
       result.plan.push(`The app commits its changes to your branch "${result.git.branch}", one commit per change.`);
     }
@@ -828,13 +975,13 @@ export class Workspace {
    * returns as soon as the project can be shown (`drawing: true`) and the chart fills in through project events;
    * `wait` returns when the drawing is done instead (the CLI).
    */
-  async openFolder(input: string, opts: { wait?: boolean } = {}): Promise<OpenResult> {
+  async openFolder(input: string, opts: { wait?: boolean; draw?: DrawChoice } = {}): Promise<OpenResult> {
     const info = await this.inspect(input);
     if (info.blocked) throw new HttpError(400, info.blocked);
     // Opening the same folder twice at once (double click) shares one import.
     const pending = this.opening.get(info.path);
     if (pending) return pending;
-    const job = this.openInspected(info).finally(() => this.opening.delete(info.path));
+    const job = this.openInspected(info, opts.draw ?? "functional").finally(() => this.opening.delete(info.path));
     this.opening.set(info.path, job);
     const r = await job;
     const drawingJob = this.jobs.get(r.name);
@@ -845,7 +992,7 @@ export class Workspace {
     return r;
   }
 
-  private async openInspected(info: FolderInspection): Promise<OpenResult> {
+  private async openInspected(info: FolderInspection, draw: DrawChoice): Promise<OpenResult> {
     const dir = info.path;
     if (info.known) {
       const p = this.get(info.name);
@@ -864,13 +1011,13 @@ export class Workspace {
     const name = this.freeName(base);
     this.reserved.add(name);
     try {
-      return await this.link({ ...info, name });
+      return await this.link({ ...info, name }, draw);
     } finally {
       this.reserved.delete(name);
     }
   }
 
-  private async link(info: FolderInspection): Promise<OpenResult> {
+  private async link(info: FolderInspection, draw: DrawChoice): Promise<OpenResult> {
     const dir = info.path;
     if (!info.git.repo) {
       await git.init(dir);
@@ -878,50 +1025,38 @@ export class Workspace {
       await git.commitAll(dir, "Before Chart Driven Development: the existing files");
     }
     const p = new Project(dir, info.name, this.ai);
-    if (info.kind === "code") {
-      // An empty board to show right away; the drawing job fills it in and commits it at the end.
-      await p.saveChart({ version: 1, name: info.name, idea: "Reading the code…", stack: null, root: { nodes: [], edges: [] }, drawing: true });
-    }
+    // Plain code opens on an empty board. What gets drawn on it (if anything) is the user's choice.
+    if (info.kind === "code") await p.saveUndrawn();
     this.linked().push({ name: info.name, dir });
     this.saveLinks();
     this.open.set(info.name, p);
     p.watch();
-    if (info.kind === "code") {
-      // If drawing fails, the half-drawn chart is removed and the folder leaves the list (open it again to retry).
-      this.jobs.set(info.name, this.draw(info.name, p));
+    if (info.kind === "code" && draw === "functional") {
+      // If drawing fails, the board goes back to empty and the choice is offered again.
+      this.jobs.set(info.name, this.draw(p));
       return { name: info.name, chart: await p.loadChart(), drawing: true };
     }
+    if (info.kind === "code" && draw === "business") await p.requestBusiness();
     return { name: info.name, chart: await p.loadChart(), drawing: false };
   }
 
-  private unlink(name: string, p: Project) {
-    const links = this.linked();
-    const i = links.findIndex((l) => l.name === name && l.dir === p.dir);
-    if (i >= 0) {
-      links.splice(i, 1);
-      this.saveLinks();
-    }
-    if (this.open.get(name) === p) {
-      p.close();
-      this.open.delete(name);
-    }
-  }
-
-  private draw(name: string, p: Project): Promise<DrawResult> {
+  private draw(p: Project): Promise<DrawResult> {
     const job = p.startDrawing();
-    job.catch(() => this.unlink(name, p));
+    job.catch(() => undefined); // reported as a "draw-failed" event; the board goes back to empty
     return job;
   }
 
-  /** Draw again a chart whose drawing was cut short (the app stopped in the middle of it). */
+  /** Draw the functional chart of an opened codebase: the first time, or again after the app stopped in the middle of it. */
   async redraw(name: string): Promise<{ ok: true }> {
     const p = this.get(name);
     if (!p.drawing) {
-      if (!(await p.loadChart()).drawing) throw new HttpError(400, "This chart is finished. To change it, select a bubble and ask the AI.");
-      // Drawing commits the folder at the end; don't sweep edits made since then into that commit.
+      const pc = await p.loadChart();
+      if (!pc.drawing && !pc.undrawn) throw new HttpError(400, "This chart is finished. To change it, select a bubble and ask the AI.");
+      // Drawing commits the folder at the end; don't sweep edits made outside the app into that commit.
       const changed = (await git.changedFiles(p.dir)).filter((f) => !f.startsWith(".chart/"));
-      if (changed.length) throw new HttpError(409, `${changed.length} file${changed.length === 1 ? " was" : "s were"} changed since the drawing stopped. Commit or stash ${changed.length === 1 ? "it" : "them"} first, then draw it again.`);
-      this.jobs.set(name, this.draw(name, p));
+      const since = pc.undrawn ? "since it was opened" : "since the drawing stopped";
+      if (changed.length) throw new HttpError(409, `${changed.length} file${changed.length === 1 ? " was" : "s were"} changed ${since}. Commit or stash ${changed.length === 1 ? "it" : "them"} first, then draw the chart.`);
+      this.jobs.set(name, this.draw(p));
     }
     return { ok: true };
   }

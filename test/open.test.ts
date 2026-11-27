@@ -223,7 +223,6 @@ describe("drawing step by step", () => {
     await write(dir, CODE);
     const r = await w.openFolder(dir);
     assert.equal(r.drawing, true);
-    assert.equal(r.chart.drawing, true);
     assert.equal(r.chart.root.nodes.length, 0, "an empty board to start");
     const p = w.get(r.name);
     const charts: ProjectChart[] = [];
@@ -292,7 +291,7 @@ describe("drawing step by step", () => {
     w.closeAll();
   });
 
-  it("puts the folder back and leaves the list when drawing fails", async () => {
+  it("goes back to an empty board, still in the list, when drawing fails", async () => {
     const ai = new GatedAI();
     ai.failModules = true;
     const w = new Workspace(path.join(tmp, "ws-fail"), ai);
@@ -307,14 +306,18 @@ describe("drawing step by step", () => {
     await release(ai);
     await until(() => !!failed);
     assert.match(failed, /DeepSeek is down/);
-    await until(() => !existsSync(path.join(dir, ".chart")));
-    assert.equal((await w.list()).length, 0);
+    await until(() => p.drawing === null);
+    const pc = await p.loadChart();
+    assert.equal(pc.undrawn, true, "the board is empty again, ready to try again");
+    assert.equal(pc.drawing, undefined);
+    assert.deepEqual((await w.list()).map((x) => x.name), [r.name]);
     assert.equal(await readFile(path.join(dir, "src/server.js"), "utf8"), CODE["src/server.js"]);
-    // Opening it again starts over.
+    // Trying again from the board.
     ai.failModules = false;
     const pump = setInterval(() => ai.gates.shift()?.(), 5);
-    const again = await w.openFolder(dir, { wait: true }).finally(() => clearInterval(pump));
-    assert.ok(again.chart.root.nodes.length > 0);
+    await w.redraw(r.name);
+    await p.drawing?.finally(() => clearInterval(pump));
+    assert.ok((await p.loadChart()).root.nodes.length > 0);
     w.closeAll();
   });
 });
@@ -426,7 +429,7 @@ describe("HTTP API", () => {
     const dir = path.join(disk, "games", "chess-engine");
     const info = await call("POST", "/api/open/inspect", { path: dir });
     assert.equal(info.data.kind, "code");
-    const opened = await call("POST", "/api/open", { path: dir });
+    const opened = await call("POST", "/api/open", { path: dir, draw: "functional" });
     assert.equal(opened.status, 200);
     assert.equal(opened.data.name, "chess-engine");
     assert.equal(opened.data.drawing, true, "returns at once; the chart arrives as events");

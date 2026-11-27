@@ -1,10 +1,11 @@
 // Offline AI for tests and demos without an API key (CDD_AI=mock).
 // Always designs the same todo app; extensions add simple pass-through functions.
+import { normBusiness } from "../../shared/business.ts";
 import { getLevel, slug } from "../../shared/chart.ts";
 import type { Bubble, Chart, ChangeSet, ChartOp, FileChange, Level, ProjectChart, Recommendation, RunTrace } from "../../shared/types.ts";
 import type { StyleGuide } from "../../shared/types.ts";
 import { styleCss } from "../design/style.ts";
-import type { AI, DesignContext, FocusContext, FolderCandidate, ImportContext, ImportedModules, MockupDraft, ModuleContext, SyncContext, WriteCodeContext } from "./ai.ts";
+import type { AI, BusinessContext, DesignContext, FocusContext, FolderCandidate, ImportContext, ImportedModules, MockupDraft, ModuleContext, SyncContext, WriteCodeContext } from "./ai.ts";
 import { keywordScore } from "../importer.ts";
 import { TODO_ALTERNATIVES, TODO_CHART, TODO_MODULE_FILES, TODO_SCAFFOLD, TODO_STACK } from "./mock-todo.ts";
 
@@ -179,6 +180,23 @@ export class MockAI implements AI {
     }
     const edges = fns.slice(1).map((n, i) => ({ id: `${fns[i].id}--${n.id}`, from: fns[i].id, to: n.id, data: "data", order: i + 1 }));
     return { nodes: fns, edges };
+  }
+
+  /** A user's action, one processing step per source file (at most 4), and the result they see. */
+  async businessFlow(ctx: BusinessContext) {
+    await mockDelay();
+    const sources = ctx.files.filter((f) => f.content && /\.(m?[jt]sx?|py|go|rs|rb)$/.test(f.path)).slice(0, 4);
+    const steps = [
+      { id: "user-acts", name: "The user does something", kind: "action", actor: "User", description: `Someone uses ${ctx.folder}.`, feature: "Main screen", dataIn: "", dataOut: "what they typed", code: [] as string[] },
+      ...sources.map((f) => ({ id: slug(f.path), name: `Handled in ${f.path.split("/").pop()}`, kind: "process", actor: "App", description: `The app works on it in ${f.path}.`, feature: f.path.split("/").at(-2) ?? "core", dataIn: "the request", dataOut: "the result", code: [f.path] })),
+      { id: "check", name: "Did it work?", kind: "decision", actor: "App", description: "The app checks the result.", feature: "Checks", dataIn: "the result", dataOut: "", code: [] },
+      { id: "user-sees", name: "The user sees the result", kind: "output", actor: "User", description: "The result is shown.", feature: "Main screen", dataIn: "the result", dataOut: "", code: [] },
+      { id: "error-shown", name: "The user sees an error", kind: "output", actor: "User", description: "Something went wrong and the user is told.", feature: "Errors", dataIn: "the problem", dataOut: "", code: [] },
+    ];
+    const chain = steps.slice(0, -2);
+    const links = chain.slice(1).map((s, i) => ({ from: chain[i].id, to: s.id, label: i ? "the result" : "what they typed", order: i + 1 }));
+    links.push({ from: "check", to: "user-sees", label: "yes", order: links.length + 1 }, { from: "check", to: "error-shown", label: "no", order: links.length + 2 });
+    return normBusiness({ summary: `How someone uses ${ctx.folder}, from their action to what they see.`, steps, links });
   }
 
   async pickProjects(ctx: { request: string; candidates: FolderCandidate[] }) {
