@@ -1,5 +1,6 @@
 import type {
   Bubble,
+  BusinessFlow,
   Chart,
   ChangeSet,
   DesignReference,
@@ -82,6 +83,11 @@ export interface ModuleContext {
   files: FileChange[];
 }
 
+/** What the AI sees to describe the business flow: the code, and the functional chart when there is one. */
+export interface BusinessContext extends ImportContext {
+  chart: ProjectChart | null;
+}
+
 /** A project folder found on disk, as the AI sees it when picking matches. */
 export interface FolderCandidate {
   path: string;
@@ -120,6 +126,11 @@ export interface AI {
   chartModules(ctx: ImportContext): Promise<ImportedModules>;
   /** Draw one module's inner chart of functions from its files. Never changes code. */
   chartModule(ctx: ModuleContext): Promise<Chart>;
+  /**
+   * Read the code and describe the business flow: how a user's actions travel through the program to their results
+   * (where data comes in, where it's processed, which features it uses, where it comes out). Never changes code.
+   */
+  businessFlow(ctx: BusinessContext): Promise<Pick<BusinessFlow, "summary" | "steps" | "links">>;
   /** Pick the folders that best match what the user described. Paths must come from `candidates`. */
   pickProjects(ctx: { request: string; candidates: FolderCandidate[] }): Promise<{ path: string; reason: string }[]>;
   /** Invent abstract sample data and trace it through one chart level, explained in plain words. */

@@ -11,7 +11,9 @@ import type { AssistantEvent } from "../shared/types.ts";
 const HELP = `Chart Driven Development, command line
 
   cdd projects                       list projects
-  cdd open <folder> [--yes]          open a folder: a chart project, or any codebase (draws its chart)
+  cdd open <folder> [--yes] [--draw functional|business|none]
+                                     open a folder: a chart project, or any codebase (draws its functional
+                                     chart by default; "business" draws the read-only business flow instead)
   cdd find <description…>            look for a project folder on this computer (read-only)
   cdd forget <project>               remove an opened folder from the list (the folder stays as it is)
   cdd remove <project> [--delete]    take a project off the list (app-made ones go to projects/.removed);
@@ -70,7 +72,10 @@ async function main(argv: string[]) {
     return;
   }
   if (cmd === "open") {
-    if (!name) throw new Error("Usage: cdd open <folder> [--yes]");
+    if (!name) throw new Error("Usage: cdd open <folder> [--yes] [--draw functional|business|none]");
+    const di = rest.indexOf("--draw");
+    const draw = di >= 0 ? rest[di + 1] : "functional";
+    if (draw !== "functional" && draw !== "business" && draw !== "none") throw new Error('--draw takes "functional", "business" or "none"');
     const info = await ws.inspect(name);
     out(`${info.display}: ${info.kind === "chart" ? "Chart Driven Development project" : "codebase without a chart"}, ${info.git.repo ? `git repo${info.git.branch ? ` on ${info.git.branch}` : ""}` : "not a git repo yet"}, ${info.files} files${info.languages.length ? `, ${info.languages.join(", ")}` : ""}`);
     if (info.blocked) throw new Error(info.blocked);
@@ -81,8 +86,17 @@ async function main(argv: string[]) {
       const a = await rl.question("Go ahead? [y/N] ").finally(() => rl.close());
       if (!/^y(es)?$/i.test(a.trim())) return out("Nothing changed.");
     }
-    if (info.kind === "code") log("Reading the code and drawing the chart…");
-    const r = await ws.openFolder(name, { wait: true });
+    if (info.kind === "code" && draw !== "none") log(draw === "business" ? "Reading the code and drawing the business flow…" : "Reading the code and drawing the chart…");
+    const r = await ws.openFolder(name, { wait: true, draw });
+    if (info.kind === "code" && draw === "business") {
+      const p = ws.get(r.name);
+      await p.businessJob;
+      const st = await p.businessState();
+      ws.closeAll();
+      if (st.error) throw new Error(`Opened as "${r.name}", but the business flow couldn't be drawn: ${st.error}`);
+      out(`Opened as "${r.name}". Business flow: ${st.flow?.summary ?? ""} (${st.flow?.steps.length ?? 0} steps)`);
+      return;
+    }
     ws.closeAll();
     out(`Opened as "${r.name}".${r.summary ? ` ${r.summary}` : ""}`);
     for (const w of r.warnings ?? []) log(`  ! ${w}`);

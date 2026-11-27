@@ -130,7 +130,9 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
       if (parts[1] === "open" && method === "POST") {
         const b = await body(req);
         if (parts.length === 3 && parts[2] === "inspect") return send(res, 200, await ws.inspect(str(b.path, "path")));
-        if (parts.length === 2) return send(res, 200, await ws.openFolder(str(b.path, "path")));
+        // The page opens plain code on an empty board and asks what to draw, unless it says already.
+        const draw = b.draw === "functional" || b.draw === "business" ? b.draw : "none";
+        if (parts.length === 2) return send(res, 200, await ws.openFolder(str(b.path, "path"), { draw }));
       }
       if (parts.length === 2 && parts[1] === "find" && method === "POST") {
         const b = await body(req);
@@ -177,7 +179,10 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
       if (method === "GET") {
         switch (action) {
           case "":
-            return send(res, 200, { name: p.name, dir: p.dir, chart: await p.loadChart(), outside: await p.checkOutside(true), drawing: !!p.drawing });
+            return send(res, 200, { name: p.name, dir: p.dir, chart: await p.loadChart(), outside: await p.checkOutside(true), drawing: !!p.drawing, business: await p.businessState() });
+          case "business":
+            // Looking at it brings it up to date if the code changed meanwhile. There's no way to edit it.
+            return send(res, 200, await p.viewBusiness());
           case "history":
             return send(res, 200, await p.history());
           case "file":
@@ -220,6 +225,9 @@ export function createServer(ws: Workspace, brainOrLabel: Brain | string, hub = 
             return send(res, 200, await p.removeBubble(level, str(b.bubbleId, "bubbleId")));
           case "edges":
             return send(res, 200, await p.addEdge(level, b.edge as never));
+          case "business":
+            // Make it (first time, or after a failure). Refused when it already matches the code: it's read-only.
+            return send(res, 200, await p.requestBusiness());
           case "run":
             return send(res, 200, await p.simulateRun(level));
           case "run/ask": {

@@ -13,6 +13,8 @@ You help the user build and change ONE project at a time by calling the tools yo
   and for code-backed bubbles `file` (path in the project) and `symbol` (function name in that file).
 - Some projects were **opened from an existing codebase** the user wrote themselves; the chart was drawn from that code
   afterwards. Follow the code's existing style and structure, and expect parts of the code that aren't on the chart yet.
+- A project may also have a **business flow** (`.chart/business.json`): how a user's actions lead to results. It is
+  read-only and rebuilt by the app whenever the code changes. Never try to edit it; change the code, and it follows.
 - **Arrows** (edges) have `from`, `to`, `data` (the data shape passed) and `order` (1-based call order).
   Inside a module, an arrow may point at a function in another module as `module-id/function-id`.
 

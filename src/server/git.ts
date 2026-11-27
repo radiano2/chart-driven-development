@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import type { HistoryEntry } from "../shared/types.ts";
@@ -129,4 +130,19 @@ export async function hasFileAt(cwd: string, sha: string, file: string): Promise
   } catch {
     return false;
   }
+}
+
+/**
+ * A fingerprint of the committed code (the chart's own .chart folder left out): it changes exactly when a commit
+ * changes the code. Uncommitted outside edits count once they're kept or read into the chart (both commit them).
+ */
+export async function codeFingerprint(cwd: string): Promise<string> {
+  let out: string;
+  try {
+    out = await git(cwd, ["ls-tree", "-r", "-z", "HEAD"]);
+  } catch {
+    return "empty"; // no commits yet
+  }
+  const lines = out.split("\0").filter((l) => l && !/\t\.chart\//.test(l));
+  return createHash("sha1").update(lines.join("\n")).digest("hex");
 }

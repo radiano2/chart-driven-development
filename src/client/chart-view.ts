@@ -46,7 +46,20 @@ export interface ChartViewCallbacks {
   onGhost(ref: string): void;
 }
 
+/** How to draw a bubble differently from the functional chart (the business flow's steps). */
+export interface NodeDecor {
+  /** Small caps line at the top, e.g. "ACTION · USER". */
+  top: string;
+  /** Line under the name. */
+  bottom: string;
+  /** Extra CSS class on the bubble, e.g. "biz biz-action". */
+  cls: string;
+  /** Hover text. */
+  title: string;
+}
+
 export class ChartView {
+  private decor: Map<string, NodeDecor> | null = null;
   private root: SVGGElement;
   private nodesG: SVGGElement;
   private edgesG: SVGGElement;
@@ -258,8 +271,9 @@ export class ChartView {
    * pop in one after another, then new arrows draw themselves; bubbles that moved glide to their new place, and a
    * module that just got functions inside pulses. With `glide`, the view refits smoothly to the new size.
    */
-  render(chart: Chart, opts: { keepView?: boolean; animate?: boolean; key?: string; glide?: boolean; enter?: { how: "in" | "out"; from?: string } } = {}) {
+  render(chart: Chart, opts: { keepView?: boolean; animate?: boolean; key?: string; glide?: boolean; enter?: { how: "in" | "out"; from?: string }; decor?: Map<string, NodeDecor> } = {}) {
     const prev = opts.animate && this.last && this.last.key === (opts.key ?? "") ? this.last : null;
+    this.decor = opts.decor ?? null;
     this.stopRun();
     this.nodesG.replaceChildren();
     this.edgesG.replaceChildren();
@@ -383,18 +397,19 @@ export class ChartView {
 
   private drawNode(n: Bubble, p: { x: number; y: number; width: number; height: number }) {
     const { width: w, height: h } = p;
-    const outer = el("g", { class: `node ${n.kind} ${n.status}${n.gui ? " gui" : ""}`, "data-id": n.id, tabindex: 0 }, this.nodesG);
+    const d = this.decor?.get(n.id);
+    const outer = el("g", { class: `node ${n.kind} ${n.status}${n.gui ? " gui" : ""}${d ? ` ${d.cls}` : ""}`, "data-id": n.id, tabindex: 0 }, this.nodesG);
     outer.style.transform = `translate(${p.x - w / 2}px,${p.y - h / 2}px)`;
     // The inner group carries the pop-in animation, so it can scale around its own centre.
     const grp = el("g", { class: "node-inner" }, outer);
     this.nodeBoxes.set(n.id, { x: p.x - w / 2, y: p.y - h / 2, w, h });
     el("rect", { width: w, height: h, rx: n.kind === "module" ? 14 : h / 2, class: "body" }, grp);
     const kind = (n.kind === "module" ? "MODULE" : n.status === "draft" ? "DRAFT" : "FUNCTION") + (n.gui ? " · UI" : "");
-    el("text", { x: w / 2, y: n.kind === "module" ? 24 : 21, class: "kind", "text-anchor": "middle" }, grp).textContent = n.status === "draft" ? `${kind} · no code yet` : kind;
+    el("text", { x: w / 2, y: n.kind === "module" ? 24 : 21, class: "kind", "text-anchor": "middle" }, grp).textContent = d ? truncate(d.top, 30) : n.status === "draft" ? `${kind} · no code yet` : kind;
     el("text", { x: w / 2, y: n.kind === "module" ? 47 : 41, class: "name", "text-anchor": "middle" }, grp).textContent = truncate(n.name, 24);
     const io = `${n.inputs.length} in · ${n.outputs.length} out${n.kind === "module" ? ` · ${n.children?.nodes.length ?? 0} inside` : ""}`;
-    el("text", { x: w / 2, y: n.kind === "module" ? 68 : 57, class: "io", "text-anchor": "middle" }, grp).textContent = io;
-    el("title", {}, grp).textContent = `${n.name}\n${n.description}${n.kind === "module" ? "\n\nDouble-click to open" : ""}`;
+    el("text", { x: w / 2, y: n.kind === "module" ? 68 : 57, class: "io", "text-anchor": "middle" }, grp).textContent = d ? truncate(d.bottom, 30) : io;
+    el("title", {}, grp).textContent = d ? d.title : `${n.name}\n${n.description}${n.kind === "module" ? "\n\nDouble-click to open" : ""}`;
 
     outer.addEventListener("click", (e) => {
       e.stopPropagation();

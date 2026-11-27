@@ -1,4 +1,5 @@
 // AI implementation backed by a JSON-returning LLM (DeepSeek by default).
+import { normBusiness } from "../../shared/business.ts";
 import { getLevel, normChart, normOps, slug } from "../../shared/chart.ts";
 import type {
   Bubble,
@@ -19,7 +20,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normStyle } from "../design/style.ts";
-import type { AI, DesignContext, FocusContext, FolderCandidate, ImportContext, ImportedModules, MockupDraft, ModuleContext, SyncContext, WriteCodeContext } from "./ai.ts";
+import type { AI, BusinessContext, DesignContext, FocusContext, FolderCandidate, ImportContext, ImportedModules, MockupDraft, ModuleContext, SyncContext, WriteCodeContext } from "./ai.ts";
 import type { JsonLLM } from "./deepseek.ts";
 
 const PREAMBLE = `You are the engine of "Chart Driven Development", an app where software is built as a flowchart.
@@ -358,6 +359,39 @@ Return: { "nodes": [ { "id", "name", "kind": "function", "description", "inputs"
       delete f.children;
     }
     return chart;
+  }
+
+  async businessFlow(ctx: BusinessContext) {
+    const chart = ctx.chart?.root.nodes.length
+      ? `\n\nThe functional chart already drawn (modules and their functions):\n${JSON.stringify(ctx.chart.root.nodes.map((m) => ({ id: m.id, name: m.name, description: m.description, functions: m.children?.nodes.map((f) => f.name) })))}`
+      : "";
+    const raw = await this.llm.json(
+      `You describe software to people who don't code. You read a program's code and draw its BUSINESS FLOW: what a user does with it, and what each action leads to inside the program.`,
+      `Project folder "${ctx.folder}".${chart}
+
+All files${ctx.tree.length >= 2000 ? " (first 2000)" : ""}:
+${ctx.tree.join("\n").slice(0, 30_000)}
+
+Contents of the most telling files${ctx.omitted ? ` (${ctx.omitted} more source files exist but aren't shown)` : ""}:
+${filesBlock(ctx.files, 110_000)}
+
+Draw the business flow of this program AS THE CODE SHOWS IT: the path a user's actions take through the program.
+Show where data comes in (what the user does or enters, or what arrives from outside), where it goes, where it is processed,
+which features of the program are used, and where results come out (what the user sees, what gets saved, sent or printed).
+So the reader understands which action of one user leads to which consequences in the program.
+- 5 to 14 steps. "kind": "action" (the user does something or data comes in), "process" (the program works on it),
+  "decision" (the flow branches; label each outgoing link with the branch, e.g. "yes" / "no" / "card declined"), "output" (a result leaves the program).
+- Every step: plain everyday words, no code names in "name" or "description". "actor": who or what does it ("User", "App", "Server", "Payment provider").
+  "feature": the feature of the program used there. "dataIn" / "dataOut": what comes in and goes out, in plain words.
+  "code": the files (paths exactly as listed) and module ids where it happens.
+- Links: from step to step in the order things happen ("order", 1-based); "label" says what passes along, in plain words.
+- If the program has several separate user journeys, draw the main ones side by side, each starting with an action.
+Do not invent features the code doesn't have. Do not change or write code.
+Return: { "summary": "one or two sentences: what the program does for its users", "steps": [ { "id": "kebab-id", "name": "...", "kind": "action", "actor": "...", "description": "...", "feature": "...", "dataIn": "...", "dataOut": "...", "code": ["..."] } ],
+"links": [ { "from": "step-id", "to": "step-id", "label": "...", "order": 1 } ] }`,
+      { maxTokens: 8_000 },
+    );
+    return normBusiness(raw);
   }
 
   async pickProjects(ctx: { request: string; candidates: FolderCandidate[] }): Promise<{ path: string; reason: string }[]> {
