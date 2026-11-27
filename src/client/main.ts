@@ -348,7 +348,8 @@ function onServerEvent(project: string, ev: ServerEvent) {
     if ($("workspace").hidden) return;
     if (state.view === "business") {
       // A run follows the flow it started on; a rebuilt flow shows once it's closed.
-      if (!state.run) renderChart(true, was?.flow?.updated !== ev.business.flow?.updated);
+      // The first flow is fitted to the board; an updated one keeps your pan and zoom and animates what's new.
+      if (!state.run) renderChart(!!was?.flow, was?.flow?.updated !== ev.business.flow?.updated);
       else renderPanel();
     }
     renderToolbar();
